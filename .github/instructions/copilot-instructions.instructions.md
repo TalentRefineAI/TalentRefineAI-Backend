@@ -8,6 +8,9 @@
   - Lógica de ingesta y procesamiento de PDFs
   - Orquestación del flujo RAG
   - Integración con Blob, Qdrant y Azure OpenAI
+- Si para una solicitud parece necesario modificar infraestructura (Terraform)
+  o frontend (Streamlit), devolver instrucción para abrir issue/PR en esos repos
+  y no proponer código aquí.
 
 ## Arquitectura esperada (según Capítulo 4)
 - Microservicios FastAPI:
@@ -31,11 +34,37 @@
 - No meter lógica de negocio en los routers.
 - Toda la configuración por `pydantic-settings`; secretos siempre vía **Key Vault** (no `os.environ` directo).
 - Mantener el modelo de datos alineado con el patrón Qdrant:
-  - vector = embedding
-  - payload JSON con: `candidate_id`, `file_name`, `contact_info`, `exp_years`, `location`, `chunk_text`, etc.
+  - `vector` = embedding
+  - `payload` JSON con, como mínimo:
+    - `candidate_id`
+    - `file_name`
+    - `contact_info`
+    - `exp_years`
+    - `location`
+    - `chunk_text`
 - Diferenciar explícitamente:
   - Flujos **asíncronos**: ingesta/procesamiento de documentos.
   - Flujos **síncronos**: consultas de reclutadores.
+- Los endpoints de ingesta (`POST /documents`) deben aceptar la petición,
+  encolar el trabajo y devolver rápido; el procesamiento pesado se hace en
+  background (task async / worker).
+- Los endpoints de `/search` deben asumir baja latencia y **NO** disparar tareas
+  de procesamiento de documentos.
+- Todas las operaciones sobre Qdrant se harán contra una única colección
+  (`talentrefine-candidates`, salvo que se indique otra en el código).
+- El `payload` JSON debe seguir siempre este patrón mínimo (se pueden añadir
+  campos nuevos solo si se documentan aquí primero):
+
+```json
+{
+  "candidate_id": "str",
+  "file_name": "str",
+  "contact_info": {},
+  "exp_years": 0,
+  "location": "str or null",
+  "chunk_text": "str"
+}
+```
 
 ## Contrato con el frontend (otro repo)
 - Endpoints:
@@ -47,11 +76,15 @@
   - Error: `{ "data": null, "error": "<mensaje claro>" }`
 - Habilitar CORS solo para el origen del frontend.
 
-## Pruebas
-- Tests con `pytest` + `httpx.AsyncClient`.
-- Mockear Azure OpenAI, Blob y Qdrant; no llamar servicios reales en tests.
-- Casos mínimos:
-  - Ingesta PDF inválido / duplicado
-  - Indexado correcto en Qdrant (vector + payload coherente)
-  - Consulta con filtros que reduce el conjunto antes de la búsqueda vectorial
-  - Respuesta sin alucinaciones cuando falta información en el CV.
+## Reglas de acción de Copilot
+- Para cada solicitud de código, actuar solo sobre lo que se pide explícitamente,
+  sin avanzar fases futuras ni añadir endpoints no mencionados.
+- No reintroducir código que haya sido eliminado en commits recientes.
+- Si el código solicitado ya existe, no modificarlo salvo que se pida expresamente
+  refactor o corrección.
+- Si se pide ampliar una función o clase existente, agregar el nuevo código de
+  forma incremental, respetando la interfaz pública actual.
+- No generar código para funcionalidades o endpoints fuera del alcance descrito
+  en este documento. Ante dudas, responder pidiendo más detalles.
+- Mantener siempre la coherencia con la arquitectura (microservicios FastAPI,
+  integración con Blob, Qdrant, Azure OpenAI y LlamaIndex).
