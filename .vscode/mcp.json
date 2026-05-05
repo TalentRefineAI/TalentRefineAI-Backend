@@ -12,15 +12,6 @@
     "context7": {
       "command": "npx",
       "args": ["-y", "@upstash/context7-mcp@latest"]
-    },
-    "qdrant": {
-      "command": "python",
-      "args": ["-m", "mcp_server_qdrant"],
-      "env": {
-        "QDRANT_URL": "https://<tu-endpoint-qdrant>",
-        "QDRANT_API_KEY": "${env:QDRANT_API_KEY}",
-        "COLLECTION_NAME": "talentrefine-candidates"
-      }
     }
   }
 }

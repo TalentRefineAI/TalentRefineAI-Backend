@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  ingest-service:
+    build:
+      context: .
+      dockerfile: app/ingest-service/Dockerfile
+    ports:
+      - "8001:8000"
+    env_file: .env
+    volumes:
+      - ./app/shared:/app/shared
+
+  processing-service:
+    build:
+      context: .
+      dockerfile: app/processing-service/Dockerfile
+    ports:
+      - "8002:8000"
+    env_file: .env
+    volumes:
+      - ./app/shared:/app/shared
+
+  rag-service:
+    build:
+      context: .
+      dockerfile: app/rag-service/Dockerfile
+    ports:
+      - "8003:8000"
+    env_file: .env
+    volumes:
+      - ./app/shared:/app/shared

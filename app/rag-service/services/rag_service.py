@@ -1,0 +1,121 @@
+"""
+Orquestación del flujo RAG completo implementado con LlamaIndex.
+Pasos:
+  1. Embedding de la query con Azure OpenAI
+  2. Prefiltrado por metadatos en Qdrant
+  3. Búsqueda vectorial
+  4. Construcción de prompt y llamada a GPT-4
+  5. Respuesta justificada
+"""
+import structlog
+from llama_index.core import VectorStoreIndex
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+
+from shared.exceptions import LLMError, VectorStoreError
+from ..integrations.azure_openai import get_embed_model, get_llm
+from ..repositories.qdrant_repository import QdrantRepository
+from ..routers.schemas import CandidateResult, SearchFilters
+
+logger = structlog.get_logger(__name__)
+
+_SYSTEM_PROMPT = """Eres un asistente de reclutamiento.
+Dado un conjunto de fragmentos de CV y una descripción de puesto,
+devuelve para cada candidato un resumen conciso y el motivo por el que encaja (o no).
+Responde siempre en español."""
+
+
+class RagService:
+    def __init__(self) -> None:
+        self._qdrant_repo = QdrantRepository()
+        self._embed_model = get_embed_model()
+        self._llm = get_llm()
+
+    async def search(
+        self,
+        job_description: str,
+        filters: SearchFilters,
+        top_k: int,
+    ) -> list[CandidateResult]:
+        """
+        Ejecuta el pipeline RAG y devuelve candidatos con score y justificación.
+        Flujo síncrono de baja latencia.
+        """
+        # 1. Obtener vector store y construir índice LlamaIndex
+        try:
+            vector_store = await self._qdrant_repo.get_vector_store()
+        except Exception as exc:
+            raise VectorStoreError(f"No se pudo conectar con Qdrant: {exc}") from exc
+
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            embed_model=self._embed_model,
+        )
+
+        # 2. Recuperar chunks con prefiltrado de metadatos
+        retriever = VectorIndexRetriever(
+            index=index,
+            similarity_top_k=top_k * 3,  # Recuperamos más para filtrar después
+        )
+        nodes = await retriever.aretrieve(job_description)
+
+        # 3. Aplicar prefiltro en Python (hasta tener filtros nativos configurados en Qdrant)
+        nodes = self._apply_filters(nodes, filters)[:top_k]
+
+        if not nodes:
+            return []
+
+        # 4. Construir prompt y llamar a GPT-4
+        try:
+            results = await self._generate_results(job_description, nodes)
+        except Exception as exc:
+            raise LLMError(f"Error en llamada al LLM: {exc}") from exc
+
+        return results
+
+    @staticmethod
+    def _apply_filters(nodes, filters: SearchFilters):
+        filtered = []
+        for node in nodes:
+            payload = node.metadata
+            if filters.min_exp_years is not None:
+                if payload.get("exp_years", 0) < filters.min_exp_years:
+                    continue
+            if filters.location:
+                loc = (payload.get("location") or "").lower()
+                if filters.location.lower() not in loc:
+                    continue
+            filtered.append(node)
+        return filtered
+
+    async def _generate_results(self, job_description: str, nodes) -> list[CandidateResult]:
+        """Llama a GPT-4 para generar resumen y motivo por candidato."""
+        results = []
+        for node in nodes:
+            payload = node.metadata
+            chunk_text = node.get_content()
+
+            prompt = (
+                f"Descripción del puesto:\n{job_description}\n\n"
+                f"Fragmento del CV del candidato {payload.get('candidate_id', '')}:\n{chunk_text}\n\n"
+                "Responde en JSON con los campos: summary (str), reason (str)."
+            )
+
+            response = await self._llm.acomplete(f"{_SYSTEM_PROMPT}\n\n{prompt}")
+            import json, re
+            match = re.search(r"\{.*\}", response.text, re.DOTALL)
+            parsed = json.loads(match.group()) if match else {"summary": "", "reason": ""}
+
+            results.append(
+                CandidateResult(
+                    candidate_id=payload.get("candidate_id", ""),
+                    file_name=payload.get("file_name", ""),
+                    score=round(node.score or 0.0, 4),
+                    summary=parsed.get("summary", ""),
+                    reason=parsed.get("reason", ""),
+                    contact_info=payload.get("contact_info", {}),
+                    exp_years=payload.get("exp_years", 0),
+                    location=payload.get("location"),
+                )
+            )
+        return results
