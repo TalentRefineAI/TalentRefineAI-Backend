@@ -18,6 +18,7 @@ class QdrantRepository:
 
     def __init__(self) -> None:
         settings = get_settings()
+        # La API key se obtiene desde Key Vault, nunca del entorno directamente
         api_key = get_secret("qdrant-api-key")
         self._client = AsyncQdrantClient(url=settings.qdrant_url, api_key=api_key)
         self._collection = settings.qdrant_collection
@@ -30,21 +31,23 @@ class QdrantRepository:
     ) -> None:
         """
         Persiste los chunks como puntos en Qdrant.
-        Cada nodo genera un punto con su embedding y el payload mínimo definido.
+        Cada nodo genera un punto con su embedding y el payload minimo definido.
         """
         points: list[PointStruct] = []
 
         for node in nodes:
             embedding = node.embedding
+            # Si un nodo no tiene embedding no se puede indexar; se omite con aviso
             if embedding is None:
                 logger.warning("node_without_embedding", node_id=node.node_id)
                 continue
 
+            # Construye el payload siguiendo el esquema minimo acordado
             payload = CandidatePayload(
                 candidate_id=str(doc_id),
                 file_name=doc_metadata.get("file_name", ""),
-                contact_info={},
-                exp_years=0,
+                contact_info={},   # se enriquecera en fases posteriores
+                exp_years=0,       # se calculara en fases posteriores
                 location=None,
                 chunk_text=node.get_content(),
             ).model_dump()
@@ -58,5 +61,6 @@ class QdrantRepository:
             )
 
         if points:
+            # Upsert en bloque para reducir el numero de llamadas a la API
             await self._client.upsert(collection_name=self._collection, points=points)
             logger.info("qdrant_upsert", collection=self._collection, points=len(points))

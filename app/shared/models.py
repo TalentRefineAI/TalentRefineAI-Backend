@@ -10,34 +10,37 @@ from pydantic import BaseModel, Field
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
 
+# Estados posibles durante el ciclo de vida de un documento
 class ProcessingStatus(StrEnum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    PENDING = "pending"      # recibido pero sin procesar
+    PROCESSING = "processing" # en curso
+    COMPLETED = "completed"  # procesado y guardado en Qdrant
+    FAILED = "failed"        # error irrecuperable
 
 
 # ── Payload Qdrant ────────────────────────────────────────────────────────────
 
 
 class CandidatePayload(BaseModel):
-    """Estructura mínima del payload JSON almacenado en Qdrant."""
+    """Estructura minima del payload JSON almacenado en Qdrant."""
 
-    candidate_id: str
-    file_name: str
-    contact_info: dict[str, Any] = Field(default_factory=dict)
-    exp_years: int = 0
-    location: str | None = None
-    chunk_text: str
+    candidate_id: str                              # identificador unico del candidato
+    file_name: str                                 # nombre original del PDF
+    contact_info: dict[str, Any] = Field(default_factory=dict)  # datos de contacto extraidos
+    exp_years: int = 0                             # anos de experiencia detectados
+    location: str | None = None                    # ubicacion del candidato
+    chunk_text: str                                # fragmento de texto del CV
 
 
-# ── Respuestas estándar API ───────────────────────────────────────────────────
+# ── Respuestas estandar API ───────────────────────────────────────────────────
 
 
 class ApiResponse(BaseModel):
-    """Envelope de respuesta estándar para todos los endpoints."""
+    """Envelope de respuesta estandar para todos los endpoints."""
 
+    # Carga util de la respuesta exitosa
     data: Any | None = None
+    # Mensaje de error; None cuando la operacion fue correcta
     error: str | None = None
 
 
@@ -45,9 +48,9 @@ class ApiResponse(BaseModel):
 
 
 class DocumentStatus(BaseModel):
-    id: UUID
-    file_name: str
-    status: ProcessingStatus
-    created_at: datetime
-    updated_at: datetime
-    error_detail: str | None = None
+    id: UUID                          # identificador unico del documento
+    file_name: str                    # nombre del archivo original
+    status: ProcessingStatus          # estado actual del procesamiento
+    created_at: datetime              # momento de recepcion
+    updated_at: datetime              # ultima actualizacion de estado
+    error_detail: str | None = None   # detalle del error si el estado es FAILED

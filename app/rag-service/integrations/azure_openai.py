@@ -9,7 +9,9 @@ from shared.config import get_secret, get_settings
 
 @lru_cache
 def get_embed_model() -> AzureOpenAIEmbedding:
+    # Singleton del modelo de embedding; reutiliza la misma instancia en todas las llamadas
     settings = get_settings()
+    # La misma clave sirve para embedding y chat en el mismo recurso Azure OpenAI
     api_key = get_secret("azure-openai-api-key")
     return AzureOpenAIEmbedding(
         model=settings.azure_openai_embedding_deployment,
@@ -22,6 +24,7 @@ def get_embed_model() -> AzureOpenAIEmbedding:
 
 @lru_cache
 def get_llm() -> AzureOpenAI:
+    # Singleton del modelo de chat GPT-4; evita crear multiples conexiones
     settings = get_settings()
     api_key = get_secret("azure-openai-api-key")
     return AzureOpenAI(

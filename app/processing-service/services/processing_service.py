@@ -15,8 +15,9 @@ from ..repositories.qdrant_repository import QdrantRepository
 
 logger = structlog.get_logger(__name__)
 
-# Parámetros de chunking
+# Tamano del fragmento de texto en tokens
 CHUNK_SIZE = 512
+# Solapamiento entre fragmentos consecutivos para preservar contexto
 CHUNK_OVERLAP = 64
 
 
@@ -24,7 +25,9 @@ class ProcessingService:
     def __init__(self) -> None:
         self._blob = BlobRepository()
         self._qdrant = QdrantRepository()
+        # Configura el modelo de embedding a nivel global de LlamaIndex
         LlamaSettings.embed_model = get_embed_model()
+        # Divisor de oraciones con ventana deslizante para mantener contexto
         self._splitter = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
     async def process_document(self, doc_id: uuid.UUID, blob_name: str) -> None:
@@ -60,13 +63,15 @@ class ProcessingService:
 
     @staticmethod
     def _extract(pdf_bytes: bytes, file_name: str) -> tuple[str, dict]:
-        """Extrae texto y metadata básica del PDF con pypdf."""
+        """Extrae texto y metadata basica del PDF con pypdf."""
         import io
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(pdf_bytes))
+        # Concatena el texto de todas las paginas; devuelve cadena vacia si la pagina no tiene texto
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
         meta = reader.metadata or {}
+        # Devuelve el texto completo y los metadatos del PDF para enriquecer el payload
         return text, {
             "file_name": file_name,
             "pages": len(reader.pages),

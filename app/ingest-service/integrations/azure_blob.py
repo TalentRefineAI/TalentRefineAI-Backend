@@ -9,7 +9,8 @@ from shared.config import get_settings
 
 @lru_cache
 def get_blob_service_client() -> BlobServiceClient:
-    """Singleton del cliente Blob usando DefaultAzureCredential (Managed Identity)."""
+    # Crea una unica instancia del cliente para reutilizar la conexion
+    # DefaultAzureCredential resuelve la autenticacion segun el entorno de ejecucion
     settings = get_settings()
     credential = DefaultAzureCredential()
     return BlobServiceClient(account_url=settings.blob_account_url, credential=credential)

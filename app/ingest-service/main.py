@@ -16,6 +16,7 @@ logger = structlog.get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Acciones al arrancar y apagar el servicio
     logger.info("ingest-service starting")
     yield
     logger.info("ingest-service shutdown")
@@ -30,6 +31,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Solo permite peticiones desde el origen del frontend configurado
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
@@ -37,9 +39,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Registra el router de documentos bajo el prefijo /documents
     app.include_router(documents.router, prefix="/documents", tags=["documents"])
 
     return app
 
 
+# Instancia de la aplicacion lista para ser servida por uvicorn
 app = create_app()

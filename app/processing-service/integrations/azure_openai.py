@@ -13,8 +13,10 @@ def get_embed_model() -> AzureOpenAIEmbedding:
     La API key se recupera desde Key Vault; nunca se hardcodea.
     """
     settings = get_settings()
+    # Secreto almacenado en Key Vault bajo el nombre 'azure-openai-api-key'
     api_key = get_secret("azure-openai-api-key")
 
+    # El deployment debe coincidir con el nombre configurado en el recurso Azure OpenAI
     return AzureOpenAIEmbedding(
         model=settings.azure_openai_embedding_deployment,
         deployment_name=settings.azure_openai_embedding_deployment,

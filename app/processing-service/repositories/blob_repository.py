@@ -13,15 +13,17 @@ class BlobRepository:
 
     def __init__(self) -> None:
         settings = get_settings()
+        # DefaultAzureCredential selecciona la credencial disponible segun el entorno
         self._credential = DefaultAzureCredential()
         self._client = BlobServiceClient(
             account_url=settings.blob_account_url,
             credential=self._credential,
         )
+        # Contenedor donde el ingest-service deposito el PDF
         self._container = settings.blob_container_name
 
     async def download(self, blob_name: str) -> bytes:
-        """Descarga un blob y devuelve su contenido como bytes."""
+        """Descarga el PDF desde Blob y lo carga en memoria para procesarlo."""
         async with self._client.get_container_client(self._container) as container:
             blob_client = container.get_blob_client(blob_name)
             stream = await blob_client.download_blob()

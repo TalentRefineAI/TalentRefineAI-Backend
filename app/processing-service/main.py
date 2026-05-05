@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Acciones al arrancar y apagar el servicio
     logger.info("processing-service starting")
     yield
     logger.info("processing-service shutdown")
@@ -29,9 +30,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Este servicio es interno; no expone CORS al exterior
     app.include_router(processing.router, prefix="/processing", tags=["processing"])
 
     return app
 
 
+# Instancia lista para ser servida por uvicorn
 app = create_app()

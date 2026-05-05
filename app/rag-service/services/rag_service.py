@@ -28,7 +28,9 @@ Responde siempre en español."""
 class RagService:
     def __init__(self) -> None:
         self._qdrant_repo = QdrantRepository()
+        # Modelo de embedding compartido con el processing-service
         self._embed_model = get_embed_model()
+        # Modelo de chat (GPT-4) para generar resumen y justificacion
         self._llm = get_llm()
 
     async def search(
@@ -38,10 +40,10 @@ class RagService:
         top_k: int,
     ) -> list[CandidateResult]:
         """
-        Ejecuta el pipeline RAG y devuelve candidatos con score y justificación.
-        Flujo síncrono de baja latencia.
+        Ejecuta el pipeline RAG y devuelve candidatos con score y justificacion.
+        Flujo sincrono de baja latencia.
         """
-        # 1. Obtener vector store y construir índice LlamaIndex
+        # 1. Obtener el vector store y construir el indice de LlamaIndex
         try:
             vector_store = await self._qdrant_repo.get_vector_store()
         except Exception as exc:
@@ -52,20 +54,20 @@ class RagService:
             embed_model=self._embed_model,
         )
 
-        # 2. Recuperar chunks con prefiltrado de metadatos
+        # 2. Recuperar mas chunks de los necesarios para poder aplicar el filtro
         retriever = VectorIndexRetriever(
             index=index,
-            similarity_top_k=top_k * 3,  # Recuperamos más para filtrar después
+            similarity_top_k=top_k * 3,  # se recuperan el triple para tener margen de filtrado
         )
         nodes = await retriever.aretrieve(job_description)
 
-        # 3. Aplicar prefiltro en Python (hasta tener filtros nativos configurados en Qdrant)
+        # 3. Filtrar en Python hasta tener filtros payload nativos configurados en Qdrant
         nodes = self._apply_filters(nodes, filters)[:top_k]
 
         if not nodes:
             return []
 
-        # 4. Construir prompt y llamar a GPT-4
+        # 4. Generar resumen y justificacion con GPT-4
         try:
             results = await self._generate_results(job_description, nodes)
         except Exception as exc:
@@ -78,9 +80,11 @@ class RagService:
         filtered = []
         for node in nodes:
             payload = node.metadata
+            # Descarta candidatos con menos experiencia de la requerida
             if filters.min_exp_years is not None:
                 if payload.get("exp_years", 0) < filters.min_exp_years:
                     continue
+            # Descarta candidatos cuya ubicacion no contiene el texto del filtro
             if filters.location:
                 loc = (payload.get("location") or "").lower()
                 if filters.location.lower() not in loc:
@@ -89,20 +93,22 @@ class RagService:
         return filtered
 
     async def _generate_results(self, job_description: str, nodes) -> list[CandidateResult]:
-        """Llama a GPT-4 para generar resumen y motivo por candidato."""
+        """Llama a GPT-4 para generar resumen y motivo de encaje por cada candidato."""
         results = []
         for node in nodes:
             payload = node.metadata
             chunk_text = node.get_content()
 
+            # Construye el prompt incluyendo la descripcion del puesto y el fragmento del CV
             prompt = (
-                f"Descripción del puesto:\n{job_description}\n\n"
+                f"Descripcion del puesto:\n{job_description}\n\n"
                 f"Fragmento del CV del candidato {payload.get('candidate_id', '')}:\n{chunk_text}\n\n"
                 "Responde en JSON con los campos: summary (str), reason (str)."
             )
 
             response = await self._llm.acomplete(f"{_SYSTEM_PROMPT}\n\n{prompt}")
             import json, re
+            # Extrae el bloque JSON de la respuesta del modelo
             match = re.search(r"\{.*\}", response.text, re.DOTALL)
             parsed = json.loads(match.group()) if match else {"summary": "", "reason": ""}
 
@@ -110,7 +116,7 @@ class RagService:
                 CandidateResult(
                     candidate_id=payload.get("candidate_id", ""),
                     file_name=payload.get("file_name", ""),
-                    score=round(node.score or 0.0, 4),
+                    score=round(node.score or 0.0, 4),  # redondea a 4 decimales
                     summary=parsed.get("summary", ""),
                     reason=parsed.get("reason", ""),
                     contact_info=payload.get("contact_info", {}),

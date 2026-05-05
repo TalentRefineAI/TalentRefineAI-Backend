@@ -88,3 +88,4 @@
   en este documento. Ante dudas, responder pidiendo más detalles.
 - Mantener siempre la coherencia con la arquitectura (microservicios FastAPI,
   integración con Blob, Qdrant, Azure OpenAI y LlamaIndex).
+  - Siempre que crees algun metodo o funcion nueva debes asegurarte que siempre lleve su breve comentario explicando su funcionalidad, y que el nombre de la función sea lo suficientemente descriptivo para entender su propósito sin necesidad de leer su implementación. Estos comentarios deben ser claros y concisos, evitando redundancias con el nombre de la función. El objetivo es que cualquier desarrollador pueda entender rápidamente qué hace la función solo con leer su firma y comentario, sin necesidad de profundizar en su código interno. Ademas no debe de llevar emoticonos ni nada por el estilo, solo texto claro y profesional.
