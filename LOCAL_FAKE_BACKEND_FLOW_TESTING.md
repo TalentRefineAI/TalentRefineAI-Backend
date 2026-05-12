@@ -57,6 +57,10 @@ FAKE_EMBEDDING_DIMENSIONS=1536
 
 Cuando `USE_FAKE_INTEGRATIONS=True`, el backend evita llamadas a Azure Blob, Azure Key Vault y Azure OpenAI.
 
+Como medida de seguridad, la configuracion impide arrancar con `USE_FAKE_INTEGRATIONS=True`
+si `APP_ENV` es `production`, `prod` o `pro`. El modo fake existe para desarrollo,
+validacion local y evidencias tecnicas; no debe activarse en entornos productivos.
+
 ---
 
 ### 2. Helpers fake compartidos
@@ -77,7 +81,28 @@ El embedding fake no representa semantica real, pero sirve para probar que el ba
 
 ---
 
-### 3. Blob local fake
+### 3. Aislamiento entre servicios reales y servicios fake
+
+El modo `local_fake` esta aislado de la logica principal de los servicios de negocio.
+La seleccion entre implementacion real y fake se hace en los routers al arrancar cada
+microservicio, leyendo `USE_FAKE_INTEGRATIONS`.
+
+En concreto:
+
+- `processing_service/services/processing_service.py` contiene el pipeline principal orientado a Azure OpenAI.
+- `processing_service/services/fake_processing_service.py` hereda el pipeline comun y solo sustituye la generacion de embeddings por vectores deterministas.
+- `rag_service/services/rag_service.py` contiene el flujo RAG real con LlamaIndex, Azure OpenAI y Qdrant.
+- `rag_service/services/fake_rag_service.py` contiene la busqueda local fake contra Qdrant y genera `summary`/`reason` sin llamar a GPT.
+- `app/shared/fakes.py` concentra utilidades fake compartidas como Blob local y embeddings deterministas.
+
+Esto evita que la logica fake quede mezclada dentro de los servicios principales y
+allana el camino hacia produccion. Los servicios principales quedan preparados para
+integrarse con Azure, mientras que los servicios fake quedan como adaptadores de
+validacion local.
+
+---
+
+### 4. Blob local fake
 
 En modo fake:
 
@@ -92,7 +117,7 @@ local_fake_blobs:/tmp/talentrefine-blobs
 
 ---
 
-### 4. Qdrant local real
+### 5. Qdrant local real
 
 Qdrant no se mockea. Se ejecuta en Docker:
 
@@ -109,21 +134,27 @@ En modo fake:
 
 ---
 
-### 5. Processing con embeddings fake
+### 6. Processing con embeddings fake
 
 El pipeline de processing sigue siendo real:
 
 ```text
-download -> pypdf -> SentenceSplitter -> upsert_nodes
+download -> PyMuPDF + pypdf metadata -> RecursiveCharacterTextSplitter -> upsert_nodes
 ```
 
-La diferencia es que, si los nodos no tienen embedding y `USE_FAKE_INTEGRATIONS=True`, se les asigna un embedding local determinista antes de persistirlos en Qdrant.
+En modo real, `ProcessingService` genera embeddings con Azure OpenAI.
+
+En modo local fake, el router usa `FakeProcessingService`, que reutiliza el pipeline comun
+de descarga, extraccion, limpieza, chunking y persistencia, pero sustituye la generacion
+de embeddings por `fake_embedding()`.
 
 ---
 
-### 6. RAG local fake
+### 7. RAG local fake
 
-En modo fake, `rag_service`:
+En modo real, `RagService` usa LlamaIndex, Azure OpenAI y Qdrant.
+
+En modo fake, el router usa `FakeRagService`, que:
 
 - no instancia Azure OpenAI,
 - no usa LlamaIndex con Azure embeddings,
@@ -134,7 +165,7 @@ Esto prueba el contrato y la recuperacion desde Qdrant sin llamar a GPT.
 
 ---
 
-### 7. Docker Compose override
+### 8. Docker Compose override
 
 Se añadió:
 
@@ -166,7 +197,7 @@ Necesitas:
   - `8003`: rag-service
   - `6333`: Qdrant
 
-El PDF debe contener texto extraible. Si es un escaneo o imagen, `pypdf` probablemente extraera texto vacio.
+El PDF debe contener texto extraible. Si es un escaneo o imagen, PyMuPDF probablemente extraera texto vacio.
 
 ---
 
@@ -381,7 +412,7 @@ Para resolverlo en una fase posterior haria falta:
 
 ### La extraccion PDF si es real
 
-La extraccion se hace con `pypdf`. Por tanto, esta prueba si puede detectar problemas con PDFs sin texto extraible.
+La extraccion de texto se hace con PyMuPDF y la metadata se lee con `pypdf`. Por tanto, esta prueba si puede detectar problemas con PDFs sin texto extraible.
 
 ---
 
@@ -454,6 +485,8 @@ ejecucion.
 ## Como volver al modo Azure real
 
 Cuando existan recursos cloud reales, debes desactivar el modo fake y usar el compose base o variables reales.
+El codigo incorpora una proteccion adicional: si `APP_ENV` es `production`, `prod` o `pro`,
+la aplicacion falla al arrancar si `USE_FAKE_INTEGRATIONS=True`.
 
 ### 1. No usar el override local fake
 
@@ -494,6 +527,16 @@ AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-4o
 CORS_ALLOWED_ORIGINS=["http://localhost:8501"]
 LOG_LEVEL=INFO
 ```
+
+Para un entorno productivo:
+
+```env
+APP_ENV=production
+USE_FAKE_INTEGRATIONS=False
+```
+
+No debe existir ningun despliegue productivo que use `docker-compose.local-fake.yml`,
+`APP_ENV=local_fake` o `USE_FAKE_INTEGRATIONS=True`.
 
 ### 3. Cargar secretos en Key Vault
 

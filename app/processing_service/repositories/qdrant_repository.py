@@ -7,7 +7,6 @@ from llama_index.core.schema import BaseNode
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from shared.config import get_secret, get_settings
-from shared.fakes import fake_embedding
 from shared.models import CandidatePayload
 
 logger = structlog.get_logger(__name__)
@@ -57,14 +56,6 @@ class QdrantRepository:
         for node in nodes:
             content = node.get_content()
             embedding = node.embedding
-            if embedding is None and self._use_fake_integrations:
-                embedding = fake_embedding(content)
-                logger.info(
-                    "fake_embeddings_generated",
-                    doc_id=str(doc_id),
-                    node_id=node.node_id,
-                    dimensions=len(embedding),
-                )
 
             # Si un nodo no tiene embedding no se puede indexar; se omite con aviso
             if embedding is None:

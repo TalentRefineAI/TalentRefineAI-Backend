@@ -7,6 +7,7 @@ from functools import lru_cache
 
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +50,14 @@ class Settings(BaseSettings):
     fake_embedding_dimensions: int = 1536
     # Nivel de log aplicado a structlog
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def prevent_fake_integrations_in_production(self) -> "Settings":
+        """Evita arrancar adaptadores fake en entornos productivos."""
+        production_envs = {"prod", "production", "pro"}
+        if self.app_env.lower() in production_envs and self.use_fake_integrations:
+            raise ValueError("USE_FAKE_INTEGRATIONS cannot be enabled in production")
+        return self
 
 
 @lru_cache

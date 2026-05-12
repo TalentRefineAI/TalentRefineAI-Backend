@@ -2,13 +2,16 @@
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, status
+from shared.config import get_settings
 from shared.models import ApiResponse
 
+from ..services.fake_processing_service import FakeProcessingService
 from ..services.processing_service import ProcessingService
 
 router = APIRouter()
-# Instancia del servicio que orquesta el pipeline de procesamiento
-_svc = ProcessingService()
+settings = get_settings()
+# Instancia del servicio que orquesta el pipeline de procesamiento.
+_svc = FakeProcessingService() if settings.use_fake_integrations else ProcessingService()
 
 
 @router.post("/{doc_id}", status_code=status.HTTP_202_ACCEPTED, response_model=ApiResponse)

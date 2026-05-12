@@ -35,6 +35,17 @@ La configuración común vive en `app/shared/config.py`. Actualmente define, ent
 
 El modo `local_fake` usa adaptadores deterministas para Blob, OpenAI y Key Vault, pero mantiene Qdrant real en Docker. Esto permite probar gran parte del flujo sin depender de recursos cloud.
 
+La logica fake esta aislada de los servicios principales:
+
+- `ProcessingService` contiene el pipeline principal orientado a Azure OpenAI.
+- `FakeProcessingService` reutiliza el pipeline comun y sustituye la generacion de embeddings por vectores deterministas.
+- `RagService` contiene el flujo RAG real con LlamaIndex, Azure OpenAI y Qdrant.
+- `FakeRagService` contiene la busqueda local fake contra Qdrant y genera `summary`/`reason` sin GPT.
+- Los routers seleccionan la implementacion real o fake leyendo `USE_FAKE_INTEGRATIONS`.
+- `app/shared/fakes.py` concentra utilidades locales fake.
+
+Ademas, `app/shared/config.py` impide arrancar con `USE_FAKE_INTEGRATIONS=true` cuando `APP_ENV` es `production`, `prod` o `pro`.
+
 ### Test Local Fake
 
 El test principal es `tests/integration/test_local_fake_flow.py`. Este test levanta el stack Docker local fake y valida:
@@ -88,6 +99,7 @@ Antes de validar una integración extremo a extremo con Azure, el frontend debe 
 ## 3. Principios de Integración
 
 - Mantener `local_fake` como primera capa de evidencia funcional.
+- Mantener la logica fake aislada en servicios/adaptadores especificos, sin mezclarla dentro de los servicios principales de produccion.
 - Integrar Azure por fases pequeñas y reversibles.
 - Validar cada recurso cloud de forma aislada antes de ejecutar el flujo completo.
 - No mezclar mocks de frontend con evidencias backend.
@@ -97,6 +109,7 @@ Antes de validar una integración extremo a extremo con Azure, el frontend debe 
 - Mantener logs estructurados en todos los servicios.
 - Propagar `doc_id` y `blob_name` en todos los eventos del flujo documental.
 - Usar entorno `dev` como primer destino de integración real.
+- Bloquear cualquier activacion de `USE_FAKE_INTEGRATIONS=true` en entornos productivos.
 - No escalar servicios backend hasta resolver persistencia de estado y coordinación entre réplicas.
 
 ## 4. Riesgos Detectados
@@ -211,6 +224,30 @@ Recomendación:
 - Alinear cliente API con los endpoints reales o crear un gateway estable.
 - Desactivar mocks en una configuración clara de entorno dev Azure.
 
+### Activacion accidental del modo fake
+
+El modo `local_fake` es util para desarrollo e integracion local, pero seria incorrecto
+activarlo en un entorno productivo porque sustituye Blob, Azure OpenAI, Key Vault y parte
+del comportamiento RAG por adaptadores locales deterministas.
+
+Impacto:
+
+- El sistema podria aceptar y procesar documentos sin usar recursos cloud reales.
+- Las respuestas RAG no tendrian calidad semantica real.
+- Las evidencias obtenidas no representarian el comportamiento productivo.
+
+Mitigacion actual:
+
+- La logica fake esta separada en `FakeProcessingService`, `FakeRagService` y `app/shared/fakes.py`.
+- Los servicios principales `ProcessingService` y `RagService` quedan orientados a produccion.
+- La configuracion falla al arrancar si `APP_ENV` es `production`, `prod` o `pro` y `USE_FAKE_INTEGRATIONS=true`.
+
+Recomendación:
+
+- Mantener `USE_FAKE_INTEGRATIONS=false` en Terraform para cualquier entorno Azure real.
+- No desplegar `docker-compose.local-fake.yml`.
+- Añadir una validacion de variables en CI/CD antes del despliegue.
+
 ## 5. Arquitectura Objetivo
 
 La arquitectura recomendada para la primera integración Azure es mantener la misma separación lógica que ya existe en backend:
@@ -243,6 +280,26 @@ La arquitectura recomendada para la primera integración Azure es mantener la mi
 12. `rag-service` busca en Qdrant.
 13. `rag-service` genera o estructura la respuesta final.
 14. Todos los servicios emiten logs estructurados con eventos trazables.
+
+### Separacion entre runtime real y runtime local fake
+
+La arquitectura objetivo para Azure debe desplegar solo el runtime real:
+
+- `ProcessingService` para embeddings con Azure OpenAI.
+- `RagService` para busqueda RAG real con LlamaIndex, Azure OpenAI y Qdrant.
+- Repositorios Blob/Qdrant configurados con endpoints y credenciales reales.
+
+El runtime local fake queda reservado para validacion local:
+
+- `FakeProcessingService` genera embeddings deterministas.
+- `FakeRagService` consulta Qdrant directamente y genera respuestas locales.
+- `app/shared/fakes.py` sustituye Blob/OpenAI en desarrollo.
+- `docker-compose.local-fake.yml` activa `APP_ENV=local_fake` y `USE_FAKE_INTEGRATIONS=true`.
+
+La seleccion se hace al arrancar los routers con `USE_FAKE_INTEGRATIONS`. En Azure real,
+Terraform debe fijar siempre `USE_FAKE_INTEGRATIONS=false`. Si por error se configura
+`APP_ENV=production` junto con `USE_FAKE_INTEGRATIONS=true`, la aplicacion debe fallar al
+arrancar.
 
 ### Matriz de decisión de topología backend
 
@@ -308,11 +365,14 @@ Criterios de aceptación:
 - Cada variable obligatoria del backend tiene un valor definido por Terraform o por configuración segura.
 - No hay dependencia implícita de nombres antiguos.
 - La documentación de `.env.example`, Terraform y backend coincide.
+- `USE_FAKE_INTEGRATIONS=false` queda fijado para cualquier despliegue Azure real.
+- Un intento de arrancar con `APP_ENV=production` y `USE_FAKE_INTEGRATIONS=true` falla de forma explícita.
 
 Evidencia:
 
 - Captura o salida de `terraform plan`.
 - Lista de variables efectivas por Container App.
+- Log de arranque o prueba de configuracion que demuestre el bloqueo del modo fake en produccion.
 
 ### Fase 2 - Decidir y materializar topología Azure backend
 
@@ -444,6 +504,7 @@ Criterios de aceptación:
 - OpenAI responde desde Container Apps.
 - No se imprimen claves en logs.
 - Los errores de rate limit, deployment inexistente o permisos quedan diferenciados.
+- Los servicios desplegados usan `ProcessingService` y `RagService`, no `FakeProcessingService` ni `FakeRagService`.
 
 Evidencia:
 
@@ -619,6 +680,12 @@ Evidencia:
 | `LOG_LEVEL` | Todos los servicios | Terraform compute | `INFO` | `DEBUG` solo temporalmente |
 | `AZURE_CLIENT_ID` | Todos los servicios con Managed Identity | Terraform security/compute | Client ID de User Assigned Managed Identity | Necesario para `DefaultAzureCredential` en algunos escenarios |
 
+Regla obligatoria:
+
+- En Azure real, `USE_FAKE_INTEGRATIONS` debe ser siempre `false`.
+- En produccion, `APP_ENV` debe ser `production`, `prod` o `pro`, y la aplicacion no debe arrancar si `USE_FAKE_INTEGRATIONS=true`.
+- El valor `APP_ENV=local_fake` queda reservado exclusivamente para Docker Compose local fake.
+
 ## 8. Estrategia de Identidad y Secretos
 
 ### Opción A - API keys en Key Vault
@@ -690,6 +757,7 @@ Esta capa detecta regresiones en:
 - escritura/lectura Qdrant local;
 - eventos de logs;
 - forma básica de respuestas HTTP.
+- seleccion controlada de `FakeProcessingService` y `FakeRagService` solo cuando `USE_FAKE_INTEGRATIONS=true`.
 
 No valida:
 
@@ -699,6 +767,9 @@ No valida:
 - Azure OpenAI real;
 - Blob Storage real;
 - despliegue Container Apps.
+
+La capa local fake no debe usarse como prueba de produccion. Su objetivo es validar
+plumbing tecnico y regresiones de flujo antes de ejecutar pruebas con recursos Azure.
 
 ### Capa 2 - Smoke tests Azure por recurso
 
@@ -805,10 +876,13 @@ No deben registrarse:
 - El test `local_fake` pasa.
 - `.env.example` está alineado con `app/shared/config.py`.
 - Terraform inyecta los mismos nombres de variables que espera el backend.
+- Terraform fija `USE_FAKE_INTEGRATIONS=false` en cualquier entorno Azure real.
+- La configuracion bloquea `USE_FAKE_INTEGRATIONS=true` cuando `APP_ENV` es productivo.
 - La topología elegida está cerrada: tres Container Apps o backend único.
 - Las imágenes backend reales se construyen y publican en ACR.
 - Los Container Apps no usan imágenes placeholder.
 - `USE_FAKE_INTEGRATIONS=false` en Azure.
+- `APP_ENV` no usa `local_fake` en Azure.
 - `APP_ENV=dev` en el primer entorno cloud.
 - Blob container existe y coincide con `BLOB_CONTAINER_NAME`.
 - La identidad tiene permisos sobre Storage.
@@ -834,6 +908,7 @@ No deben registrarse:
 - Se puede reconstruir todo el flujo buscando por `doc_id`.
 - El frontend puede ejecutar upload y búsqueda sin mocks.
 - Los errores se registran sin secretos ni datos sensibles.
+- No aparecen logs `mode=local_fake` ni eventos exclusivos del fake en entornos Azure reales.
 
 ## 13. Decisiones Pendientes
 
@@ -882,6 +957,8 @@ No deben registrarse:
 - No integrar Azure real dentro del test `local_fake`.
 - No mezclar evidencias de mocks frontend con evidencias backend.
 - No asumir que RBAC y API keys son equivalentes.
+- No desplegar con `USE_FAKE_INTEGRATIONS=true`.
+- No usar `APP_ENV=local_fake` fuera de Docker Compose local.
 - No escalar Container Apps backend sin resolver persistencia de estado.
 - No cambiar rutas HTTP públicas sin coordinar frontend y tests.
 - No registrar contenido completo de CVs en logs.

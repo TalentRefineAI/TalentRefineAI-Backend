@@ -1,13 +1,16 @@
 """Router de búsqueda – rag-service."""
 from fastapi import APIRouter, HTTPException, status
+from shared.config import get_settings
 from shared.models import ApiResponse
 
+from ..services.fake_rag_service import FakeRagService
 from ..services.rag_service import RagService
 from .schemas import CandidateResult, SearchRequest
 
 router = APIRouter()
-# Instancia del servicio RAG que orquesta el pipeline de busqueda
-_svc = RagService()
+settings = get_settings()
+# Instancia del servicio RAG que orquesta el pipeline de busqueda.
+_svc = FakeRagService() if settings.use_fake_integrations else RagService()
 
 
 @router.post("", response_model=ApiResponse)

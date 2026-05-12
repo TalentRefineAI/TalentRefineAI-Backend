@@ -12,7 +12,6 @@ import structlog
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from llama_index.core.schema import TextNode
 from pypdf import PdfReader
-from shared.config import get_settings
 from shared.exceptions import ProcessingError, VectorStoreError
 
 from ..integrations.azure_openai import get_embed_model
@@ -32,11 +31,12 @@ _SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
 class ProcessingService:
     def __init__(self) -> None:
-        settings = get_settings()
+        self._init_common_dependencies()
+        self._embed_model = get_embed_model()
+
+    def _init_common_dependencies(self) -> None:
         self._blob = BlobRepository()
         self._qdrant = QdrantRepository()
-        self._use_fake_integrations = settings.use_fake_integrations
-        self._embed_model = None if self._use_fake_integrations else get_embed_model()
         # [BK-05] Divisor recursivo que intenta preservar parrafos y oraciones
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=CHUNK_SIZE,
@@ -78,11 +78,7 @@ class ProcessingService:
         logger.info("chunks_created", doc_id=str(doc_id), blob_name=blob_name, chunks=len(chunks))
 
         # 5. Embedding en bloque: una llamada a la API por lote de chunks
-        embeddings = (
-            [None for _ in chunks]
-            if self._use_fake_integrations
-            else self._embed_model.get_text_embedding_batch(chunks)
-        )
+        embeddings = self._get_embeddings(chunks, doc_id)
 
         # 6. Construye TextNode con el texto y su embedding para persistir en Qdrant
         nodes = [
@@ -97,6 +93,10 @@ class ProcessingService:
             raise VectorStoreError(f"Error persistiendo en Qdrant: {exc}") from exc
 
         logger.info("processing_done", doc_id=str(doc_id), blob_name=blob_name, chunks=len(nodes))
+
+    def _get_embeddings(self, chunks: list[str], doc_id: uuid.UUID) -> list[list[float]]:
+        """Genera embeddings reales usando Azure OpenAI."""
+        return self._embed_model.get_text_embedding_batch(chunks)
 
     @staticmethod
     def _extract(pdf_bytes: bytes, file_name: str) -> tuple[str, dict]:
