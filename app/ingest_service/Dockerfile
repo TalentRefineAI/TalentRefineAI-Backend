@@ -14,6 +14,7 @@ RUN pip install --upgrade pip && \
         azure-identity \
         azure-storage-blob \
         aiohttp \
+        httpx \
         python-multipart \
         azure-keyvault-secrets \
         structlog

@@ -2,7 +2,6 @@
 from functools import lru_cache
 
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
-
 from shared.config import get_secret, get_settings
 
 

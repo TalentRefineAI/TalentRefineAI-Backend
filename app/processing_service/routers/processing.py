@@ -1,9 +1,9 @@
 """Router de procesamiento – processing-service."""
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status
-
+from fastapi import APIRouter, BackgroundTasks, status
 from shared.models import ApiResponse
+
 from ..services.processing_service import ProcessingService
 
 router = APIRouter()

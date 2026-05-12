@@ -2,8 +2,8 @@
 import structlog
 from azure.identity.aio import DefaultAzureCredential
 from azure.storage.blob.aio import BlobServiceClient
-
 from shared.config import get_settings
+from shared.fakes import local_blob_upload
 
 logger = structlog.get_logger(__name__)
 
@@ -15,6 +15,7 @@ class BlobRepository:
         settings = get_settings()
         self._account_url = settings.blob_account_url
         self._container = settings.blob_container_name
+        self._use_fake_integrations = settings.use_fake_integrations
         # Cliente y credencial se crean de forma lazy para no conectar con Azure al importar
         self._credential: DefaultAzureCredential | None = None
         self._client: BlobServiceClient | None = None
@@ -29,12 +30,22 @@ class BlobRepository:
             )
         return self._client
 
-    async def upload(self, blob_name: str, data: bytes, content_type: str = "application/pdf") -> str:
+    async def upload(
+        self,
+        blob_name: str,
+        data: bytes,
+        content_type: str = "application/pdf",
+    ) -> str:
         """
         Sube datos a Blob Storage.
         Usa simple upload para archivos menores de 100 MB.
         Devuelve la URL del blob creado.
         """
+        if self._use_fake_integrations:
+            uri = await local_blob_upload(blob_name, data)
+            logger.info("local_blob_uploaded", blob_name=blob_name, bytes=len(data), uri=uri)
+            return uri
+
         async with self._get_client().get_container_client(self._container) as container:
             blob_client = container.get_blob_client(blob_name)
             # overwrite=True permite resubir el mismo archivo si el proceso falla y se reintenta
@@ -43,7 +54,7 @@ class BlobRepository:
                 overwrite=True,
                 content_settings={"content_type": content_type},
             )
-            logger.info("blob_uploaded", blob=blob_name, container=self._container)
+            logger.info("blob_uploaded", blob_name=blob_name, container=self._container)
             return blob_client.url
 
     async def download(self, blob_name: str) -> bytes:

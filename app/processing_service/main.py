@@ -6,10 +6,11 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
+from shared.logging import configure_logging
 
-from shared.config import get_settings
 from .routers import processing
 
+configure_logging("processing-service")
 logger = structlog.get_logger(__name__)
 
 
@@ -22,8 +23,6 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    settings = get_settings()
-
     app = FastAPI(
         title="TalentRefine – Processing Service",
         version="0.1.0",

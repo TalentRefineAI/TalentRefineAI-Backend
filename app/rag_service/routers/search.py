@@ -1,7 +1,7 @@
 """Router de búsqueda – rag-service."""
 from fastapi import APIRouter, HTTPException, status
-
 from shared.models import ApiResponse
+
 from ..services.rag_service import RagService
 from .schemas import CandidateResult, SearchRequest
 

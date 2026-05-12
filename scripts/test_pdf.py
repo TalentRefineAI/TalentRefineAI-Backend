@@ -110,7 +110,7 @@ print(f"Tamano del archivo: {len(pdf_bytes) / 1024:.1f} KB")
 
 # 2. Extraer texto y metadata [BK-04]
 raw_text, metadata = extract(pdf_bytes, pdf_path.name)
-print(f"\n[BK-04] Metadata del PDF:")
+print("\n[BK-04] Metadata del PDF:")
 for k, v in metadata.items():
     print(f"  {k}: {v}")
 print(f"\n[BK-04] Texto extraido: {len(raw_text)} caracteres")

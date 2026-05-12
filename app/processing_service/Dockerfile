@@ -20,6 +20,8 @@ RUN pip install --upgrade pip && \
         pypdf \
         langchain-text-splitters \
         openai \
+        llama-index \
+        "llama-index-embeddings-azure-openai" \
         qdrant-client
 
 # Runtime stage – imagen final ligera

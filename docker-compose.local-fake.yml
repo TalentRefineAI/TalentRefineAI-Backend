@@ -1,0 +1,31 @@
+services:
+  ingest-service:
+    user: "0:0"
+    environment:
+      APP_ENV: local_fake
+      USE_FAKE_INTEGRATIONS: "true"
+      LOCAL_BLOB_PATH: /tmp/talentrefine-blobs
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - ./app/shared:/app/shared
+      - local_fake_blobs:/tmp/talentrefine-blobs
+
+  processing-service:
+    user: "0:0"
+    environment:
+      APP_ENV: local_fake
+      USE_FAKE_INTEGRATIONS: "true"
+      LOCAL_BLOB_PATH: /tmp/talentrefine-blobs
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - ./app/shared:/app/shared
+      - local_fake_blobs:/tmp/talentrefine-blobs
+
+  rag-service:
+    environment:
+      APP_ENV: local_fake
+      USE_FAKE_INTEGRATIONS: "true"
+      QDRANT_URL: http://qdrant:6333
+
+volumes:
+  local_fake_blobs:

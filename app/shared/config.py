@@ -41,6 +41,12 @@ class Settings(BaseSettings):
 
     # Entorno de ejecucion: development | staging | production
     app_env: str = "development"
+    # Activa adaptadores locales deterministas en lugar de Azure Blob/OpenAI/Key Vault
+    use_fake_integrations: bool = False
+    # Directorio compartido por ingest-service y processing-service en modo local_fake
+    local_blob_path: str = "/tmp/talentrefine-blobs"
+    # Dimension del vector usado en modo local_fake; compatible con text-embedding-3-large
+    fake_embedding_dimensions: int = 1536
     # Nivel de log aplicado a structlog
     log_level: str = "INFO"
 
@@ -61,5 +67,7 @@ def get_secret_client() -> SecretClient:
 
 def get_secret(secret_name: str) -> str:
     # Obtiene el valor de un secreto por nombre; devuelve cadena vacia si es None
+    if get_settings().use_fake_integrations:
+        return ""
     client = get_secret_client()
     return client.get_secret(secret_name).value or ""

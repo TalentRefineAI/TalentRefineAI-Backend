@@ -7,10 +7,12 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from shared.config import get_settings
+from shared.logging import configure_logging
+
 from .routers import upload
 
+configure_logging("ingest-service")
 logger = structlog.get_logger(__name__)
 
 
