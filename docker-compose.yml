@@ -1,32 +1,76 @@
 version: "3.9"
 
 services:
+
+  # ── Qdrant vector store ──────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ── Ingest Service ───────────────────────────────────────────────────────────
   ingest-service:
     build:
       context: .
-      dockerfile: app/ingest-service/Dockerfile
+      dockerfile: app/ingest_service/Dockerfile
     ports:
       - "8001:8000"
     env_file: .env
+    # En dev se monta el código fuente para que los cambios se reflejen sin rebuild
     volumes:
+      - ./app/ingest_service:/app/ingest_service
       - ./app/shared:/app/shared
+    # En dev uvicorn arranca con --reload para recarga automática
+    command: >
+      sh -c "if [ \"$$DEV_MODE\" = '1' ]; then
+               uvicorn ingest_service.main:app --host 0.0.0.0 --port 8000 --reload;
+             else
+               uvicorn ingest_service.main:app --host 0.0.0.0 --port 8000;
+             fi"
+    depends_on:
+      - qdrant
 
+  # ── Processing Service ───────────────────────────────────────────────────────
   processing-service:
     build:
       context: .
-      dockerfile: app/processing-service/Dockerfile
+      dockerfile: app/processing_service/Dockerfile
     ports:
       - "8002:8000"
     env_file: .env
     volumes:
+      - ./app/processing_service:/app/processing_service
       - ./app/shared:/app/shared
+    command: >
+      sh -c "if [ \"$$DEV_MODE\" = '1' ]; then
+               uvicorn processing_service.main:app --host 0.0.0.0 --port 8000 --reload;
+             else
+               uvicorn processing_service.main:app --host 0.0.0.0 --port 8000;
+             fi"
+    depends_on:
+      - qdrant
 
+  # ── RAG Service ──────────────────────────────────────────────────────────────
   rag-service:
     build:
       context: .
-      dockerfile: app/rag-service/Dockerfile
+      dockerfile: app/rag_service/Dockerfile
     ports:
       - "8003:8000"
     env_file: .env
     volumes:
+      - ./app/rag_service:/app/rag_service
       - ./app/shared:/app/shared
+    command: >
+      sh -c "if [ \"$$DEV_MODE\" = '1' ]; then
+               uvicorn rag_service.main:app --host 0.0.0.0 --port 8000 --reload;
+             else
+               uvicorn rag_service.main:app --host 0.0.0.0 --port 8000;
+             fi"
+    depends_on:
+      - qdrant
+
+volumes:
+  qdrant_data:

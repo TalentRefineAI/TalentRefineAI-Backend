@@ -17,6 +17,8 @@ dependencies = [
     # Azure SDK
     "azure-identity>=1.17.0",
     "azure-storage-blob>=12.22.0",
+    "aiohttp>=3.9.0",
+    "python-multipart>=0.0.9",
     "azure-keyvault-secrets>=4.8.0",
     "openai>=1.35.0",
     # Vector store
@@ -26,8 +28,11 @@ dependencies = [
     "llama-index-vector-stores-qdrant>=0.3.0",
     "llama-index-embeddings-azure-openai>=0.2.0",
     "llama-index-llms-azure-openai>=0.2.0",
-    # Procesamiento de PDFs
+    # Procesamiento de PDFs: pypdf para metadata, PyMuPDF para extraccion de texto
     "pypdf>=4.3.0",
+    "pymupdf>=1.24.0",
+    # Chunking recursivo [BK-05]
+    "langchain-text-splitters>=0.3.0",
     # HTTP async
     "httpx>=0.27.0",
     # Logging estructurado

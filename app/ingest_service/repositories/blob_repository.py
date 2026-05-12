@@ -13,14 +13,21 @@ class BlobRepository:
 
     def __init__(self) -> None:
         settings = get_settings()
-        # DefaultAzureCredential usa Managed Identity en Azure y az login en local
-        self._credential = DefaultAzureCredential()
-        self._client = BlobServiceClient(
-            account_url=settings.blob_account_url,
-            credential=self._credential,
-        )
-        # Nombre del contenedor donde se almacenan los CVs
+        self._account_url = settings.blob_account_url
         self._container = settings.blob_container_name
+        # Cliente y credencial se crean de forma lazy para no conectar con Azure al importar
+        self._credential: DefaultAzureCredential | None = None
+        self._client: BlobServiceClient | None = None
+
+    def _get_client(self) -> BlobServiceClient:
+        # Crea el cliente Blob solo cuando se necesita por primera vez
+        if self._client is None:
+            self._credential = DefaultAzureCredential()
+            self._client = BlobServiceClient(
+                account_url=self._account_url,
+                credential=self._credential,
+            )
+        return self._client
 
     async def upload(self, blob_name: str, data: bytes, content_type: str = "application/pdf") -> str:
         """
@@ -28,7 +35,7 @@ class BlobRepository:
         Usa simple upload para archivos menores de 100 MB.
         Devuelve la URL del blob creado.
         """
-        async with self._client.get_container_client(self._container) as container:
+        async with self._get_client().get_container_client(self._container) as container:
             blob_client = container.get_blob_client(blob_name)
             # overwrite=True permite resubir el mismo archivo si el proceso falla y se reintenta
             await blob_client.upload_blob(
@@ -41,7 +48,7 @@ class BlobRepository:
 
     async def download(self, blob_name: str) -> bytes:
         """Descarga un blob y devuelve su contenido en memoria."""
-        async with self._client.get_container_client(self._container) as container:
+        async with self._get_client().get_container_client(self._container) as container:
             blob_client = container.get_blob_client(blob_name)
             stream = await blob_client.download_blob()
             return await stream.readall()

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from shared.config import get_settings
-from .routers import documents
+from .routers import upload
 
 logger = structlog.get_logger(__name__)
 
@@ -39,8 +39,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Registra el router de documentos bajo el prefijo /documents
-    app.include_router(documents.router, prefix="/documents", tags=["documents"])
+    # Registra el router de upload bajo el prefijo /upload (BK-02)
+    app.include_router(upload.router, prefix="/upload", tags=["upload"])
 
     return app
 
