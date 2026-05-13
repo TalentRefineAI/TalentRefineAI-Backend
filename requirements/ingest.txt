@@ -1,0 +1,12 @@
+aiohttp==3.13.5
+azure-identity==1.25.3
+azure-keyvault-secrets==4.11.0
+azure-storage-blob==12.28.0
+fastapi==0.136.1
+httpx==0.28.1
+pydantic==2.13.4
+pydantic-settings==2.14.1
+python-multipart==0.0.28
+structlog==25.5.0
+uvicorn[standard]==0.46.0
+

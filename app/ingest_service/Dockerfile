@@ -3,24 +3,17 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /build
 
-COPY pyproject.toml .
+COPY requirements/ingest.txt requirements.txt
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir hatchling && \
-    pip install --no-cache-dir \
-        fastapi \
-        "uvicorn[standard]" \
-        pydantic \
-        pydantic-settings \
-        azure-identity \
-        azure-storage-blob \
-        aiohttp \
-        httpx \
-        python-multipart \
-        azure-keyvault-secrets \
-        structlog
+    pip install --no-cache-dir -r requirements.txt
 
 # Runtime stage – imagen final ligera
 FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
 
 # Usuario sin privilegios para ejecutar la app
 RUN useradd --create-home appuser
@@ -34,8 +27,6 @@ COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 # Copia el código fuente
 COPY app/ingest_service ./ingest_service
 COPY app/shared ./shared
-
-ENV PYTHONPATH=/app
 
 EXPOSE 8000
 
