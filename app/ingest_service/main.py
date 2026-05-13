@@ -44,6 +44,10 @@ def create_app() -> FastAPI:
     # Registra el router de upload bajo el prefijo /upload (BK-02)
     app.include_router(upload.router, prefix="/upload", tags=["upload"])
 
+    @app.get("/health", tags=["health"])
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "service": "ingest-service"}
+
     return app
 
 
