@@ -160,7 +160,13 @@ services:
     networks:
       - talentrefine-local
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5

@@ -161,7 +161,7 @@ cp .env.example .env
 # Editar .env con los endpoints reales de Azure
 ```
 
-### 3. Arrancar los servicios
+### 3. Arrancar los servicios con Azure real
 
 ```bash
 docker compose up --build
@@ -171,6 +171,23 @@ Los servicios quedan disponibles en:
 - `http://localhost:8001` — ingest-service
 - `http://localhost:8002` — processing-service
 - `http://localhost:8003` — rag-service
+- `http://localhost:8501` — Streamlit frontend
+
+### 4. Arrancar el stack local fake
+
+Para demos y pruebas sin credenciales de Azure Blob, Azure OpenAI ni Key Vault:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local-fake.yml up --build
+```
+
+Comando equivalente:
+
+```bash
+make dev-fake
+```
+
+En este modo, los servicios usan Qdrant local en `http://qdrant:6333`, almacenamiento local compartido para blobs y adaptadores fake deterministas.
 
 ---
 

@@ -12,7 +12,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 DOCKER_COMPOSE_FILES = ["docker-compose.yml", "docker-compose.local-fake.yml"]
 DOCKER_COMPOSE_BASE = ["docker", "compose"]
 LOG_BASE_DIR = ROOT_DIR / "tests" / "integration" / "logs"
-LOG_SERVICES = ["ingest-service", "processing-service", "rag-service", "qdrant"]
+LOG_SERVICES = ["ingest-service", "processing-service", "rag-service", "qdrant", "streamlit-frontend"]
 
 
 def make_log_dir() -> Path:
@@ -302,6 +302,7 @@ def local_fake_stack():
                 "ingest-service",
                 "processing-service",
                 "rag-service",
+                "streamlit-frontend",
             ]
         )
     except RuntimeError as exc:
@@ -309,12 +310,15 @@ def local_fake_stack():
         pytest.skip(f"No se pudo iniciar Docker Compose: {exc}")
 
     try:
-        wait_for_compose_services(["qdrant", "ingest-service", "processing-service", "rag-service"])
+        wait_for_compose_services(
+            ["qdrant", "ingest-service", "processing-service", "rag-service", "streamlit-frontend"]
+        )
         service_urls = {
             "qdrant": "http://qdrant:6333",
             "ingest": "http://ingest-service:8000",
             "processing": "http://processing-service:8000",
             "rag": "http://rag-service:8000",
+            "frontend": "http://streamlit-frontend:8501",
         }
         save_text_file(
             log_dir / "docker_compose_runtime_urls.txt",
@@ -331,6 +335,9 @@ def local_fake_stack():
         )
         wait_for_internal_http(
             "ingest-service", f"{service_urls['rag']}/openapi.json", timeout_sec=120
+        )
+        wait_for_internal_http(
+            "ingest-service", f"{service_urls['frontend']}/_stcore/health", timeout_sec=120
         )
         yield {"log_dir": log_dir, "service_urls": service_urls}
     finally:
