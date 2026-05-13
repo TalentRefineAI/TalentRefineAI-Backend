@@ -1,36 +1,63 @@
-# Makefile – TalentRefine AI Backend
-# Equivalente a npm run dev / npm run start para el stack de microservicios
+# Makefile - TalentRefine AI Backend
 #
 # Uso:
-#   make dev      →  levanta todo en modo desarrollo (hot-reload, código montado en volumen)
-#   make start    →  levanta todo en modo producción (imágenes construidas, sin mounts)
-#   make build    →  solo construye las imágenes Docker sin levantar
-#   make down     →  para y elimina los contenedores
-#   make logs     →  muestra los logs en tiempo real de todos los servicios
-#   make ps       →  estado de los contenedores
+#   make dev      ->  levanta los 3 servicios en tu maquina (requiere .env con credenciales Azure)
+#                     hot-reload activo; ideal para desarrollo
+#   make stop     ->  para los 3 servicios lanzados por make dev
+#   make start    ->  levanta el stack completo en Docker (equivalente a produccion)
+#   make build    ->  construye las imagenes Docker sin levantar
+#   make down     ->  para el stack Docker
+#   make logs     ->  logs en tiempo real del stack Docker
+#   make ps       ->  estado de los contenedores Docker
 
-.PHONY: dev start build down logs ps
+PYTHON := .venv/bin/python
+UVICORN := .venv/bin/uvicorn
 
-# Levanta todos los servicios en modo desarrollo con hot-reload
+.PHONY: dev stop ingest start build down logs ps
+
+# Levanta solo el ingest-service. Solo requiere az login + Blob Storage real.
+# QDRANT_URL, KEY_VAULT_URL y AZURE_OPENAI_ENDPOINT pueden ser valores dummy en .env
+ingest:
+	@echo "  ingest-service  http://127.0.0.1:8001/docs   http://127.0.0.1:8001/health"
+	PYTHONPATH=app $(UVICORN) ingest_service.main:app --port 8001 --reload
+
+# Levanta los 3 microservicios directamente en la maquina con hot-reload.
+# Lee las credenciales de .env. Requiere az login o variables de entorno de Azure.
 dev:
-	DEV_MODE=1 docker compose up --build
+	@echo "Arrancando stack en local (CTRL+C para parar)..."
+	@PYTHONPATH=app $(UVICORN) ingest_service.main:app --port 8001 --reload &
+	@PYTHONPATH=app $(UVICORN) processing_service.main:app --port 8002 --reload &
+	@PYTHONPATH=app $(UVICORN) rag_service.main:app --port 8003 --reload &
+	@echo ""
+	@echo "  ingest-service     http://127.0.0.1:8001/docs   http://127.0.0.1:8001/health"
+	@echo "  processing-service http://127.0.0.1:8002/docs   http://127.0.0.1:8002/health"
+	@echo "  rag-service        http://127.0.0.1:8003/docs   http://127.0.0.1:8003/health"
+	@echo ""
+	@wait
 
-# Levanta todos los servicios en modo producción (sin hot-reload ni mounts de código)
+# Para los procesos uvicorn lanzados por make dev
+stop:
+	@pkill -f "uvicorn ingest_service.main" 2>/dev/null || true
+	@pkill -f "uvicorn processing_service.main" 2>/dev/null || true
+	@pkill -f "uvicorn rag_service.main" 2>/dev/null || true
+	@echo "Servicios parados."
+
+# Levanta todo el stack en Docker con las variables de .env (modo produccion)
 start:
-	DEV_MODE=0 docker compose up --build
+	docker compose up --build
 
-# Construye las imágenes sin levantar los contenedores
+# Construye las imagenes Docker sin levantarlas
 build:
 	docker compose build
 
-# Para y elimina los contenedores (los datos de Qdrant se conservan en el volumen)
+# Para el stack Docker
 down:
 	docker compose down
 
-# Muestra los logs en tiempo real de todos los servicios
+# Logs en tiempo real del stack Docker
 logs:
 	docker compose logs -f
 
-# Muestra el estado actual de los contenedores
+# Estado de los contenedores Docker
 ps:
 	docker compose ps

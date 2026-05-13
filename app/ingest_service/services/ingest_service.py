@@ -16,17 +16,9 @@ _ALLOWED_CONTENT_TYPES = {"application/pdf"}
 
 class IngestService:
     def __init__(self) -> None:
-        # BlobRepository se inicializa de forma lazy en la primera llamada real
-        # para evitar conectar con Azure al arrancar el servicio
-        self._blob: BlobRepository | None = None
+        self._blob = BlobRepository()
         # En produccion este estado vivira en una base de datos o cola (Azure Storage Queue)
         self._status_store: dict[uuid.UUID, DocumentStatus] = {}
-
-    def _get_blob(self) -> BlobRepository:
-        # Crea el cliente Blob solo cuando se necesita por primera vez
-        if self._blob is None:
-            self._blob = BlobRepository()
-        return self._blob
 
     async def accept_uploads(
         self,
@@ -76,7 +68,7 @@ class IngestService:
             content = await file.read()
             # La ruta en Blob incluye el doc_id para evitar colisiones de nombre
             blob_name = f"{doc_id}/{file.filename}"
-            await self._get_blob().upload(blob_name, content, content_type="application/pdf")
+            await self._blob.upload(blob_name, content, content_type="application/pdf")
 
             record.status = ProcessingStatus.COMPLETED
             logger.info("blob_uploaded", doc_id=str(doc_id), blob=blob_name)

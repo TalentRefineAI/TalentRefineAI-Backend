@@ -16,7 +16,6 @@ logger = structlog.get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Acciones al arrancar y apagar el servicio
     logger.info("ingest-service starting")
     yield
     logger.info("ingest-service shutdown")
@@ -31,7 +30,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Solo permite peticiones desde el origen del frontend configurado
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
@@ -39,7 +37,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Registra el router de upload bajo el prefijo /upload (BK-02)
+    @app.get("/health", tags=["health"])
+    async def health() -> dict:
+        # Comprueba que el servicio esta vivo; no requiere conexion con Azure
+        return {"status": "ok", "service": "ingest-service"}
+
     app.include_router(upload.router, prefix="/upload", tags=["upload"])
 
     return app
