@@ -9,6 +9,16 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - talentrefine-local
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/6333; printf \"GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200\" <&3'",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   # ── Ingest Service ───────────────────────────────────────────────────────────
   ingest-service:
@@ -33,9 +43,22 @@ services:
                uvicorn ingest_service.main:app --host 0.0.0.0 --port 8000;
              fi"
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     networks:
       - talentrefine-local
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   # ── Processing Service ───────────────────────────────────────────────────────
   processing-service:
@@ -58,9 +81,22 @@ services:
                uvicorn processing_service.main:app --host 0.0.0.0 --port 8000;
              fi"
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     networks:
       - talentrefine-local
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   # ── RAG Service ──────────────────────────────────────────────────────────────
   rag-service:
@@ -83,9 +119,22 @@ services:
                uvicorn rag_service.main:app --host 0.0.0.0 --port 8000;
              fi"
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     networks:
       - talentrefine-local
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   # ── Streamlit Frontend ───────────────────────────────────────────────────────
   streamlit-frontend:
@@ -104,10 +153,18 @@ services:
       - ../TalentRefineAI-Frontend:/app
       - streamlit_cache:/home/streamlit/.streamlit/cache
     depends_on:
-      - ingest-service
-      - rag-service
+      ingest-service:
+        condition: service_healthy
+      rag-service:
+        condition: service_healthy
     networks:
       - talentrefine-local
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
 
 volumes:
   qdrant_data:
