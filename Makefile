@@ -13,13 +13,23 @@
 PYTHON := .venv/bin/python
 UVICORN := .venv/bin/uvicorn
 
-.PHONY: dev stop ingest start build down logs ps
+.PHONY: dev stop ingest processing rag start build down logs ps
 
 # Levanta solo el ingest-service. Solo requiere az login + Blob Storage real.
 # QDRANT_URL, KEY_VAULT_URL y AZURE_OPENAI_ENDPOINT pueden ser valores dummy en .env
 ingest:
 	@echo "  ingest-service  http://127.0.0.1:8001/docs   http://127.0.0.1:8001/health"
 	PYTHONPATH=app $(UVICORN) ingest_service.main:app --port 8001 --reload
+
+# Levanta solo el processing-service. Requiere az login + Blob Storage + Qdrant + Azure OpenAI.
+processing:
+	@echo "  processing-service  http://127.0.0.1:8002/docs   http://127.0.0.1:8002/health"
+	PYTHONPATH=app $(UVICORN) processing_service.main:app --port 8002 --reload
+
+# Levanta solo el rag-service. Requiere az login + Qdrant + Azure OpenAI + Key Vault.
+rag:
+	@echo "  rag-service  http://127.0.0.1:8003/docs   http://127.0.0.1:8003/health"
+	PYTHONPATH=app $(UVICORN) rag_service.main:app --port 8003 --reload
 
 # Levanta los 3 microservicios directamente en la maquina con hot-reload.
 # Lee las credenciales de .env. Requiere az login o variables de entorno de Azure.
