@@ -158,8 +158,14 @@ Cada punto almacena el embedding del chunk y el siguiente payload mínimo:
 
 ```bash
 cp .env.example .env
-# Editar .env con los endpoints reales de Azure
+# Editar .env con endpoints, nombres de deployment y URLs reales de Azure
 ```
+
+El archivo `.env` local no debe contener API keys ni credenciales. Para el modo con Azure real,
+las claves de Azure OpenAI y Qdrant se recuperan desde Azure Key Vault usando
+`DefaultAzureCredential`; en local, autentícate previamente con `az login`. La plantilla
+versionada `.env.example` solo define variables no secretas como endpoints, nombres de recursos
+y flags de entorno.
 
 ### 3. Arrancar los servicios con Azure real
 
