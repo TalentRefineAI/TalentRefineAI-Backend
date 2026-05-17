@@ -1,19 +1,20 @@
 # Makefile - TalentRefine AI Backend
 #
 # Uso:
-#   make dev      ->  levanta los 3 servicios en tu maquina (requiere .env con credenciales Azure)
-#                     hot-reload activo; ideal para desarrollo
-#   make stop     ->  para los 3 servicios lanzados por make dev
-#   make start    ->  levanta el stack completo en Docker (equivalente a produccion)
-#   make build    ->  construye las imagenes Docker sin levantar
-#   make down     ->  para el stack Docker
-#   make logs     ->  logs en tiempo real del stack Docker
-#   make ps       ->  estado de los contenedores Docker
+#   make dev       ->  levanta los 3 servicios en tu maquina con Azure real (requiere az login)
+#                      hot-reload activo; ideal para desarrollo con credenciales Azure
+#   make dev-fake  ->  levanta el stack completo en modo local fake sin credenciales Azure
+#   make stop      ->  para los 3 servicios lanzados por make dev
+#   make start     ->  levanta todo en modo produccion (imagenes construidas, sin mounts)
+#   make build     ->  solo construye las imagenes Docker sin levantar
+#   make down      ->  para y elimina los contenedores
+#   make logs      ->  muestra los logs en tiempo real de todos los servicios
+#   make ps        ->  estado de los contenedores
 
-PYTHON := .venv/bin/python
-UVICORN := .venv/bin/uvicorn
+PYTHON := .venv/Scripts/python
+UVICORN := .venv/Scripts/uvicorn
 
-.PHONY: dev stop ingest processing rag start build down logs ps
+.PHONY: dev dev-fake stop ingest processing rag start build down logs ps
 
 # Levanta solo el ingest-service. Solo requiere az login + Blob Storage real.
 # QDRANT_URL, KEY_VAULT_URL y AZURE_OPENAI_ENDPOINT pueden ser valores dummy en .env
@@ -52,7 +53,11 @@ stop:
 	@pkill -f "uvicorn rag_service.main" 2>/dev/null || true
 	@echo "Servicios parados."
 
-# Levanta todo el stack en Docker con las variables de .env (modo produccion)
+# Levanta el stack completo en modo local fake, sin Azure Blob/OpenAI/Key Vault
+dev-fake:
+	DEV_MODE=1 docker compose -f docker-compose.yml -f docker-compose.local-fake.yml up --build
+
+# Levanta todos los servicios en modo produccion (sin hot-reload ni mounts de codigo)
 start:
 	docker compose up --build
 
