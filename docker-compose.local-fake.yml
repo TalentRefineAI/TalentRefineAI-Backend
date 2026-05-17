@@ -1,0 +1,44 @@
+# docker-compose.local-fake.yml
+# Override para desarrollo local SIN Azure (USE_FAKE_INTEGRATIONS=true).
+# Uso: docker compose -f docker-compose.yml -f docker-compose.local-fake.yml up --build
+#
+# Simula:
+#   - Azure Blob Storage  -> directorio local /tmp/talentrefine-blobs (volumen compartido)
+#   - Azure Key Vault     -> sin conexion (get_secret devuelve cadena vacia)
+#   - Azure OpenAI        -> embeddings deterministicos via SHA-256, sin LLM real
+#   - Qdrant              -> contenedor local real (datos persisten en qdrant_data)
+
+x-fake-env: &fake-env
+  USE_FAKE_INTEGRATIONS: "true"
+  QDRANT_URL: "http://qdrant:6333"
+  LOCAL_BLOB_PATH: "/tmp/talentrefine-blobs"
+  # Las siguientes variables son requeridas por pydantic-settings aunque no se usen en fake mode
+  KEY_VAULT_URL: ""
+  BLOB_ACCOUNT_URL: ""
+  AZURE_OPENAI_ENDPOINT: ""
+
+services:
+  ingest-service:
+    environment:
+      <<: *fake-env
+    volumes:
+      - local_fake_blobs:/tmp/talentrefine-blobs
+    # Sin dependencia de Azure, arranca directamente
+    command: uvicorn ingest_service.main:app --host 0.0.0.0 --port 8000 --reload
+
+  processing-service:
+    environment:
+      <<: *fake-env
+    volumes:
+      - local_fake_blobs:/tmp/talentrefine-blobs
+    command: uvicorn processing_service.main:app --host 0.0.0.0 --port 8000 --reload
+
+  rag-service:
+    environment:
+      <<: *fake-env
+    volumes:
+      - local_fake_blobs:/tmp/talentrefine-blobs
+    command: uvicorn rag_service.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  local_fake_blobs:

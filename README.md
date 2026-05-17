@@ -19,7 +19,7 @@ app/
 ### Flujo de ingesta (asincrono)
 
 ```
-Frontend --> POST /documents --> ingest-service --> Blob Storage
+Frontend --> POST /upload --> ingest-service --> Blob Storage
                                                --> (background task) --> processing-service
                                                                       --> Extraccion PDF (pypdf)
                                                                       --> Chunking (LlamaIndex)
@@ -72,7 +72,7 @@ TalentRefineAI-Backend/
 |   |
 |   |-- ingest_service/
 |   |   |-- main.py
-|   |   |-- routers/           # POST /documents  GET /documents/{id}/status
+|   |   |-- routers/           # POST /upload  GET /upload/{id}/status
 |   |   |-- services/          # Validacion, encolado y background task
 |   |   |-- repositories/      # Acceso a Blob Storage
 |   |   `-- integrations/      # Cliente Azure Blob
@@ -119,10 +119,10 @@ Todos los endpoints siguen el mismo envelope de respuesta:
 
 | Metodo | Ruta | Status HTTP | Descripcion |
 |---|---|---|---|
-| `POST` | `/documents` | 202 | Sube uno o varios PDFs (multipart/form-data). Responde de inmediato; el procesamiento es asincrono. |
-| `GET` | `/documents/{id}/status` | 200 / 404 | Consulta el estado de procesamiento de un documento. |
+| `POST` | `/upload` | 202 | Sube uno o varios PDFs (multipart/form-data). Responde de inmediato; el procesamiento es asincrono. |
+| `GET` | `/upload/{id}/status` | 200 / 404 | Consulta el estado de procesamiento de un documento. |
 
-**Respuesta 202 de `POST /documents`:**
+**Respuesta 202 de `POST /upload`:**
 ```json
 {
   "data": [
