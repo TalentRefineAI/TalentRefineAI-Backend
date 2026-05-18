@@ -136,6 +136,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -190,6 +192,9 @@ cython_debug/
 
 # Ruff stuff:
 .ruff_cache/
+
+# Local integration evidence
+tests/integration/logs/
 
 # PyPI configuration file
 .pypirc

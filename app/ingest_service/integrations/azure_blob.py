@@ -3,7 +3,6 @@ from functools import lru_cache
 
 from azure.identity.aio import DefaultAzureCredential
 from azure.storage.blob.aio import BlobServiceClient
-
 from shared.config import get_settings
 
 

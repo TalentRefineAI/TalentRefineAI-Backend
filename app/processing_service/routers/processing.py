@@ -4,11 +4,11 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from shared.models import ApiResponse
-from ..services.processing_service import ProcessingService
+from ..services.indexing_service import IndexingService
 
 router = APIRouter()
 # Instancia del servicio que orquesta el pipeline de procesamiento
-_svc = ProcessingService()
+_svc = IndexingService()
 
 
 @router.post("/{doc_id}", status_code=status.HTTP_202_ACCEPTED, response_model=ApiResponse)

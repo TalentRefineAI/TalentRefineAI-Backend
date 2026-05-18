@@ -7,10 +7,12 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from shared.config import get_settings
+from shared.logging import configure_logging
+
 from .routers import search
 
+configure_logging("rag-service")
 logger = structlog.get_logger(__name__)
 
 
@@ -47,6 +49,10 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "rag-service"}
 
     app.include_router(search.router, prefix="/search", tags=["search"])
+
+    @app.get("/health", tags=["health"])
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "service": "rag-service"}
 
     return app
 

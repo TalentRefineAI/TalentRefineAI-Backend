@@ -7,10 +7,12 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from shared.config import get_settings
+from shared.logging import configure_logging
+
 from .routers import upload
 
+configure_logging("ingest-service")
 logger = structlog.get_logger(__name__)
 
 
@@ -43,6 +45,10 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "ingest-service"}
 
     app.include_router(upload.router, prefix="/upload", tags=["upload"])
+
+    @app.get("/health", tags=["health"])
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "service": "ingest-service"}
 
     return app
 

@@ -1,29 +1,22 @@
-"""Router de búsqueda – rag-service."""
 from fastapi import APIRouter, HTTPException, status
 
-from shared.models import ApiResponse
-from ..services.rag_service import RagService
-from .schemas import CandidateResult, SearchRequest
+from ..services.rag_engine import RAGEngine
+from .schemas import SearchRequest, SearchResponse
 
 router = APIRouter()
-# Instancia del servicio RAG que orquesta el pipeline de busqueda
-_svc = RagService()
+# Instancia del motor RAG que orquesta el pipeline de busqueda
+_engine = RAGEngine()
 
 
-@router.post("", response_model=ApiResponse)
-async def search_candidates(body: SearchRequest) -> ApiResponse:
+@router.post("", response_model=SearchResponse)
+async def search_candidates(body: SearchRequest) -> SearchResponse:
     """
     Recibe la descripcion del puesto y filtros opcionales.
     Devuelve candidatos ordenados por relevancia con resumen y justificacion.
     Flujo sincrono de baja latencia; no dispara procesamiento de documentos.
     """
     try:
-        results: list[CandidateResult] = await _svc.search(
-            job_description=body.job_description,
-            filters=body.filters,
-            top_k=body.top_k,
-        )
-        return ApiResponse(data=results)
+        return await _engine.search_candidates(body)
     except Exception as exc:
         # Cualquier error inesperado se devuelve como 500 con detalle
         raise HTTPException(

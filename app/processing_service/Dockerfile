@@ -3,27 +3,17 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /build
 
-COPY pyproject.toml .
+COPY requirements/processing.txt requirements.txt
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir hatchling && \
-    pip install --no-cache-dir \
-        fastapi \
-        "uvicorn[standard]" \
-        pydantic \
-        pydantic-settings \
-        azure-identity \
-        azure-storage-blob \
-        aiohttp \
-        azure-keyvault-secrets \
-        structlog \
-        pymupdf \
-        pypdf \
-        langchain-text-splitters \
-        openai \
-        qdrant-client
+    pip install --no-cache-dir -r requirements.txt
 
 # Runtime stage – imagen final ligera
 FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
 
 RUN useradd --create-home appuser
 WORKDIR /app
@@ -34,8 +24,6 @@ COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 
 COPY app/processing_service ./processing_service
 COPY app/shared ./shared
-
-ENV PYTHONPATH=/app
 
 EXPOSE 8000
 

@@ -1,5 +1,5 @@
 """
-Shared – Configuración global de la aplicación.
+Shared – Configuracion global de la aplicacion.
 Lee valores desde Azure Key Vault usando DefaultAzureCredential.
 Nunca se usan os.environ directamente para secretos.
 """
@@ -14,34 +14,38 @@ class Settings(BaseSettings):
     # Lee variables desde el archivo .env; ignora claves desconocidas
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # URL del vault donde se almacenan todos los secretos del proyecto
-    key_vault_url: str  # https://<vault-name>.vault.azure.net/
+    # ── Modo fake (sin Azure) ─────────────────────────────────────────────────
+    # Cuando es True, todos los adaptadores Azure quedan desactivados y se
+    # usan implementaciones locales (blob en disco, embeddings deterministicos).
+    use_fake_integrations: bool = False
 
-    # Cuenta de almacenamiento donde se guardan los PDFs subidos
-    blob_account_url: str  # https://<account>.blob.core.windows.net
-    # Nombre del contenedor Blob que recibe los CVs
+    # ── Azure Key Vault ───────────────────────────────────────────────────────
+    # Opcional: en fake mode no se conecta al vault
+    key_vault_url: str = ""  # https://<vault-name>.vault.azure.net/
+
+    # ── Azure Blob Storage ────────────────────────────────────────────────────
+    blob_account_url: str = ""  # https://<account>.blob.core.windows.net
     blob_container_name: str = "cv-uploads"
 
-    # Endpoint del cluster Qdrant donde se almacenan los vectores
-    qdrant_url: str
-    # Nombre de la coleccion unica que usa toda la aplicacion
+    # Directorio local usado en fake mode para simular Blob Storage
+    local_blob_path: str = "/tmp/talentrefine-blobs"
+
+    # ── Qdrant ───────────────────────────────────────────────────────────────
+    qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "talentrefine-candidates"
 
-    # Endpoint del recurso Azure OpenAI
-    azure_openai_endpoint: str
-    # Version de la API de Azure OpenAI
+    # ── Azure OpenAI ─────────────────────────────────────────────────────────
+    azure_openai_endpoint: str = ""
     azure_openai_api_version: str = "2024-02-15-preview"
-    # Nombre del deployment usado para generar embeddings
-    azure_openai_embedding_deployment: str = "text-embedding-3-large"
-    # Nombre del deployment de chat (GPT-4)
-    azure_openai_chat_deployment: str = "gpt-4o"
+    azure_openai_embedding_deployment: str = "text-embedding-3-small"
+    azure_openai_chat_deployment: str = "gpt-4o-mini"
 
-    # Origenes permitidos por CORS; debe incluir la URL del frontend Streamlit
+    # Dimensiones del vector de embedding (debe coincidir con el deployment real)
+    fake_embedding_dimensions: int = 1536
+
+    # ── App ──────────────────────────────────────────────────────────────────
     cors_allowed_origins: list[str] = ["http://localhost:8501"]
-
-    # Entorno de ejecucion: development | staging | production
     app_env: str = "development"
-    # Nivel de log aplicado a structlog
     log_level: str = "INFO"
 
 
@@ -60,6 +64,11 @@ def get_secret_client() -> SecretClient:
 
 
 def get_secret(secret_name: str) -> str:
-    # Obtiene el valor de un secreto por nombre; devuelve cadena vacia si es None
+    """
+    Devuelve el valor del secreto desde Key Vault.
+    En fake mode devuelve cadena vacia sin conectar con Azure.
+    """
+    if get_settings().use_fake_integrations:
+        return ""
     client = get_secret_client()
     return client.get_secret(secret_name).value or ""
