@@ -2,965 +2,627 @@
 
 ## 1. Objetivo
 
-Este documento define el plan técnico para pasar del flujo local fake actual a una integración real con Azure, manteniendo la trazabilidad y las evidencias que ya proporciona el test `local_fake`.
+Este documento alinea el plan de integracion Azure con el estado actual de la rama `dev` del backend tras la reunion de cambios de otras ramas.
 
-El objetivo no es sustituir el test local fake, sino complementarlo. El flujo local fake demuestra que la lógica principal del backend funciona de extremo a extremo sin depender de servicios cloud reales. La integración con Azure debe demostrar una capa distinta: que esa misma arquitectura puede ejecutarse correctamente con Blob Storage, Key Vault, Azure OpenAI, Qdrant desplegado en Azure, Container Apps, Application Insights y el frontend apuntando a contratos reales.
+El objetivo no es sustituir el flujo `local_fake`, sino mantenerlo como baseline funcional local y anadir una capa de validacion real contra Azure: Blob Storage, Key Vault o Managed Identity, Azure OpenAI, Qdrant desplegado en Azure, Azure Container Apps, Log Analytics/Application Insights y frontend consumiendo contratos reales.
 
-La transición debe hacerse de forma incremental. Cada fase debe dejar una evidencia clara: logs estructurados, comandos ejecutados, respuestas HTTP relevantes, recursos Azure validados y criterios de aceptación verificables.
+La integracion debe hacerse de forma incremental. Cada fase debe dejar evidencia clara: comandos ejecutados, respuestas HTTP, logs estructurados, recursos validados y criterios de aceptacion verificables.
 
-## 2. Estado Actual
+## 2. Estado actual contrastado en `dev`
 
 ### Backend
 
-El backend está dividido en tres servicios FastAPI:
+El backend esta dividido en tres microservicios FastAPI:
 
-- `ingest_service`: recibe PDFs, los sube a almacenamiento y dispara el procesamiento.
-- `processing_service`: descarga el PDF, extrae texto, crea chunks, genera embeddings y persiste vectores.
-- `rag_service`: recibe una descripción de puesto, consulta Qdrant y genera resultados RAG.
+- `ingest_service`: recibe PDFs en `POST /upload`, valida `application/pdf`, sube el blob y dispara processing por HTTP interno.
+- `processing_service`: recibe `POST /processing/{doc_id}`, descarga el PDF, extrae texto, crea chunks, genera embeddings y persiste puntos en Qdrant.
+- `rag_service`: recibe `POST /search`, recupera candidatos desde Qdrant y genera respuesta RAG.
 
-La configuración común vive en `app/shared/config.py`. Actualmente define, entre otras, estas variables relevantes para Azure:
+La configuracion comun vive en `app/shared/config.py` y actualmente define estas variables relevantes:
 
+- `USE_FAKE_INTEGRATIONS`
 - `KEY_VAULT_URL`
 - `BLOB_ACCOUNT_URL`
 - `BLOB_CONTAINER_NAME`
+- `LOCAL_BLOB_PATH`
 - `QDRANT_URL`
 - `QDRANT_COLLECTION`
 - `AZURE_OPENAI_ENDPOINT`
 - `AZURE_OPENAI_API_VERSION`
 - `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`
 - `AZURE_OPENAI_CHAT_DEPLOYMENT`
+- `FAKE_EMBEDDING_DIMENSIONS`
+- `CORS_ALLOWED_ORIGINS`
 - `APP_ENV`
-- `USE_FAKE_INTEGRATIONS`
 - `LOG_LEVEL`
 
-El modo `local_fake` usa adaptadores deterministas para Blob, OpenAI y Key Vault, pero mantiene Qdrant real en Docker. Esto permite probar gran parte del flujo sin depender de recursos cloud.
+El modo fake local esta implementado mediante condicionales dentro de servicios/repositorios existentes, no mediante clases separadas `FakeProcessingService` o `FakeRagService`:
 
-La logica fake esta aislada de los servicios principales:
+- `IndexingService` usa `fake_embedding()` cuando `USE_FAKE_INTEGRATIONS=true`; si no, configura `LlamaSettings.embed_model` con Azure OpenAI.
+- `RAGEngine` delega a `_search_fake()` o `_search_azure()` segun `USE_FAKE_INTEGRATIONS`.
+- Los repositorios de Blob cambian entre disco local y Azure Blob segun `USE_FAKE_INTEGRATIONS`.
+- `app/shared/fakes.py` concentra `local_blob_upload()`, `local_blob_download()` y `fake_embedding()`.
+- `get_secret()` devuelve cadena vacia en fake; en modo real lee de Key Vault con `DefaultAzureCredential`.
 
-- `ProcessingService` contiene el pipeline principal orientado a Azure OpenAI.
-- `FakeProcessingService` reutiliza el pipeline comun y sustituye la generacion de embeddings por vectores deterministas.
-- `RagService` contiene el flujo RAG real con LlamaIndex, Azure OpenAI y Qdrant.
-- `FakeRagService` contiene la busqueda local fake contra Qdrant y genera `summary`/`reason` sin GPT.
-- Los routers seleccionan la implementacion real o fake leyendo `USE_FAKE_INTEGRATIONS`.
-- `app/shared/fakes.py` concentra utilidades locales fake.
+Importante: a fecha de esta revision, `app/shared/config.py` no bloquea todavia arrancar con `USE_FAKE_INTEGRATIONS=true` en `APP_ENV=production`, `prod` o `pro`. Ese bloqueo debe tratarse como tarea pendiente de hardening, no como capacidad ya existente.
 
-Ademas, `app/shared/config.py` impide arrancar con `USE_FAKE_INTEGRATIONS=true` cuando `APP_ENV` es `production`, `prod` o `pro`.
+### Contratos HTTP actuales
 
-### Test Local Fake
+| Servicio | Puerto local | Ruta | Estado actual |
+| --- | --- | --- | --- |
+| ingest | 8001 | `GET /health` | Implementado |
+| ingest | 8001 | `POST /upload` | Implementado; devuelve envelope `ApiResponse` con lista de documentos |
+| ingest | 8001 | `GET /upload/{doc_id}/status` | Implementado con estado en memoria del propio proceso |
+| processing | 8002 | `GET /health` | Implementado |
+| processing | 8002 | `POST /processing/{doc_id}?blob_name=...` | Implementado; encola background task |
+| rag | 8003 | `GET /health` | Implementado |
+| rag | 8003 | `POST /search` | Implementado; devuelve `SearchResponse` sin envelope `ApiResponse` |
 
-El test principal es `tests/integration/test_local_fake_flow.py`. Este test levanta el stack Docker local fake y valida:
+El frontend debe consumir estas rutas o debe existir un gateway que traduzca rutas como `/api/v1/documents/upload` y `/api/v1/rag/query` a los contratos reales.
 
+### Flujo local fake actual
+
+El modo fake local se activa con `docker-compose.local-fake.yml`:
+
+- `APP_ENV=local_fake`
+- `USE_FAKE_INTEGRATIONS=true`
+- `LOCAL_BLOB_PATH=/tmp/talentrefine-blobs`
+- `QDRANT_URL=http://qdrant:6333`
+
+Qdrant no se mockea: se ejecuta como contenedor real `qdrant/qdrant:v1.17.1` y se comparte entre processing y rag.
+
+El test E2E principal esta ahora en `tests/integration/local_fake/test_backend_flow.py`, con harness en `tests/integration/local_fake/conftest.py`. El fichero historico `tests/integration/test_local_fake_flow.py` queda como referencia de compatibilidad y no contiene ya el flujo activo. El E2E actual valida:
+
+- disponibilidad de servicios;
 - subida de PDF;
-- almacenamiento fake compartido entre servicios;
-- trigger del procesamiento;
-- extracción de texto;
-- chunking;
-- generación de embeddings fake;
-- upsert en Qdrant real;
-- búsqueda RAG;
-- respuesta final asociada al `doc_id` procesado;
-- captura de logs y evidencias bajo `tests/integration/logs/`.
+- disparo automatico de processing desde `ingest-service`;
+- espera activa mediante polling de `POST /search` hasta encontrar el `doc_id` subido;
+- busqueda RAG;
+- validacion de esquema para `job_description` corto.
 
-Este test debe mantenerse como baseline local. Su valor principal es detectar regresiones funcionales del flujo backend sin coste cloud y sin ruido de infraestructura Azure.
+El E2E genera evidencias automaticamente bajo `tests/integration/logs/local_fake_flow_<timestamp>/`, incluyendo `flow_evidence.txt`, `docker_compose_ps.txt`, `docker_compose_config.txt` y logs por servicio. Ademas, los unitarios generan evidencias bajo `tests/unit/logs/unit_<timestamp>/`.
 
-### Infraestructura
+Los comandos mantenidos por el `Makefile` son:
 
-El repositorio de infraestructura contiene módulos Terraform para:
+- `make test-unit`
+- `make test-fake-flow`
+- `make test-fake-all`
 
-- Resource Group;
-- Networking;
-- Private Endpoints;
-- Storage Account, Blob Container y File Share;
-- Azure OpenAI;
-- Managed Identity y Key Vault;
-- Monitoring;
-- Azure Container Registry;
-- Container Apps Environment;
-- Container Apps para Qdrant, backend y frontend.
+El `Makefile` usa `PYTEST_BIN ?= python -m pytest`, por lo que cada colaborador puede activar su propio entorno virtual o sobrescribir la ruta con `PYTEST_BIN=/ruta/a/pytest`.
 
-La infraestructura actual todavía no está completamente alineada con el backend real. El módulo de compute define un único Container App `backend` con una imagen placeholder, mientras el backend real está dividido en tres servicios. Además, hay diferencias entre los nombres de variables que Terraform inyecta y los nombres que el backend espera.
+### Estado en memoria
 
-### Frontend
+`IngestService` guarda estados en un diccionario local:
 
-El frontend Streamlit conserva lógica mock. El cliente API apunta a rutas como:
+```text
+self._status_store: dict[uuid.UUID, DocumentStatus] = {}
+```
 
-- `/api/v1/documents/upload`
-- `/api/v1/rag/query`
-- `/api/v1/documents/status`
+Esto sirve para desarrollo y pruebas locales, pero no es valido para Container Apps con reinicios, escalado o multiples replicas. Ademas, processing no actualiza ese estado al terminar porque no existe un store compartido entre servicios.
 
-El backend actual expone contratos distintos, como:
+### Observabilidad actual
 
-- `/upload`
-- `/upload/{doc_id}/status`
-- `/search`
+`app/shared/logging.py` configura `structlog` con:
 
-Antes de validar una integración extremo a extremo con Azure, el frontend debe alinearse con los endpoints reales o introducirse una capa gateway/API que exponga los contratos que el frontend espera.
+- `logger`
+- `level`
+- `service`
+- `timestamp`
 
-## 3. Principios de Integración
+Eventos actuales relevantes:
+
+- `document_upload_accepted`
+- `fake_blob_uploaded`
+- `blob_uploaded`
+- `processing_triggered`
+- `blob_uploaded_and_processing_triggered`
+- `indexing_started`
+- `chunks_generated`
+- `fake_embedding_generated`
+- `qdrant_collection_created`
+- `qdrant_upsert`
+- `indexing_completed`
+- `llm_response_parse_failed`
+
+Gaps frente al objetivo Azure:
+
+- No se incluye todavia `environment` en todos los logs.
+- No hay `correlation_id`.
+- Los nombres de eventos no estan normalizados con el plan anterior (`chunks_created` vs `chunks_generated`, `qdrant_upsert_completed` vs `qdrant_upsert`).
+- `rag_service` tiene poca instrumentacion de inicio/fin de busqueda.
+- No se miden `duration_ms` de llamadas externas.
+
+### Infraestructura contrastada en repo vecino
+
+Se reviso tambien `/home/jldom/TFM/TalentRefine/TalentRefineAI-Infra/terraform` porque este plan contiene decisiones de Terraform. Estado observado:
+
+- Existe modulo de storage con Blob container `pdfs` y Azure File Share para Qdrant.
+- Existe modulo de compute con ACR, Container Apps Environment, Qdrant, un unico Container App `backend` y un Container App `frontend`.
+- `backend` y `frontend` usan imagen placeholder `mcr.microsoft.com/azuredocs/containerapps-helloworld:latest`.
+- El modulo compute ya inyecta variables alineadas con backend para Key Vault, OpenAI y Blob: `KEY_VAULT_URL`, `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`, `AZURE_OPENAI_CHAT_DEPLOYMENT`, `BLOB_ACCOUNT_URL`, `BLOB_CONTAINER_NAME`, `USE_FAKE_INTEGRATIONS=false`, `APP_ENV=development` y `APPLICATIONINSIGHTS_CONNECTION_STRING`.
+- El modulo compute aun no inyecta explicitamente `AZURE_OPENAI_API_VERSION`, `QDRANT_COLLECTION` ni `LOG_LEVEL`; el backend usara sus defaults si no se definen.
+- `QDRANT_URL` se construye como `https://${azurerm_container_app.qdrant.ingress[0].fqdn}`.
+- No hay aun tres Container Apps separados para `ingest-service`, `processing-service` y `rag-service`.
+
+Por tanto, la infra ha avanzado en configuracion, pero sigue desalineada en topologia y en uso de imagenes reales.
+
+### Frontend contrastado en repo vecino
+
+Se reviso `/home/jldom/TFM/TalentRefine/TalentRefineAI-Frontend`, actualmente en rama `main`. Estado observado:
+
+- `utils/api_client.py` conserva `use_mock=True` por defecto.
+- El cliente real todavia llama a rutas `/api/v1/documents/upload`, `/api/v1/rag/query`, `/api/v1/documents/status`, `/api/v1/candidates/{id}` y `/api/v1/filters/...`.
+- El backend actual expone `POST /upload`, `GET /upload/{doc_id}/status` y `POST /search`; no expone aun esas rutas `/api/v1`.
+- `components/results_view.py` fuerza `get_api_client(use_mock=True)`, por lo que la busqueda sigue usando mocks aunque se configure otra cosa fuera.
+- `docker-compose.yml` del frontend define `USE_MOCK_DATA=True` y no define `BACKEND_URL`, `INGEST_API_URL` ni `RAG_API_URL`.
+- Terraform define `BACKEND_URL` para el Container App frontend, pero el codigo actual del frontend no lo usa para construir `RAGAPIClient`.
+
+Por tanto, el frontend sigue pendiente de alineacion funcional con backend real o de una capa gateway compatible con `/api/v1`.
+
+## 3. Principios de integracion
 
 - Mantener `local_fake` como primera capa de evidencia funcional.
-- Mantener la logica fake aislada en servicios/adaptadores especificos, sin mezclarla dentro de los servicios principales de produccion.
-- Integrar Azure por fases pequeñas y reversibles.
-- Validar cada recurso cloud de forma aislada antes de ejecutar el flujo completo.
-- No mezclar mocks de frontend con evidencias backend.
-- No cambiar contratos HTTP sin documentar el impacto en frontend y tests.
-- Usar configuración explícita por entorno.
-- Evitar valores implícitos en Terraform que no coincidan con `app/shared/config.py`.
-- Mantener logs estructurados en todos los servicios.
-- Propagar `doc_id` y `blob_name` en todos los eventos del flujo documental.
-- Usar entorno `dev` como primer destino de integración real.
-- Bloquear cualquier activacion de `USE_FAKE_INTEGRATIONS=true` en entornos productivos.
-- No escalar servicios backend hasta resolver persistencia de estado y coordinación entre réplicas.
+- No presentar fake como prueba productiva.
+- Separar con claridad lo implementado de lo pendiente.
+- Integrar Azure por fases pequenas, verificables y reversibles.
+- Usar `app/shared/config.py` como fuente de verdad de variables backend.
+- No cambiar contratos HTTP sin documentar impacto en frontend y tests.
+- Desplegar en Azure una topologia coherente con el backend: tres servicios o un backend unificado tras refactor explicito.
+- Evitar escalar servicios backend hasta persistir estado documental fuera de memoria.
+- Evitar logs con CVs completos, secretos, API keys o tokens.
 
-## 4. Riesgos Detectados
+## 4. Riesgos detectados
 
-### Topología backend no alineada con Terraform
+### Topologia backend no alineada con Terraform
 
-El backend real tiene tres servicios, pero Terraform define un único Container App `backend`. Esto puede provocar que el despliegue Azure no refleje el flujo probado localmente.
+El backend real tiene tres servicios. Terraform define un unico Container App `backend` con imagen placeholder.
 
 Impacto:
 
-- `ingest_service` no podrá resolver correctamente `processing-service` si ese servicio no existe en Azure.
-- El flujo local fake pasará, pero el flujo Azure fallará al disparar procesamiento.
-- La observabilidad quedará menos clara si se empaquetan responsabilidades sin rediseñar rutas y logs.
+- `ingest_service` llama a `http://processing-service:8000/processing/{doc_id}`; esa resolucion no existira en Azure si solo hay un Container App `backend`.
+- Los logs y responsabilidades quedan mezclados o directamente no desplegados.
+- El flujo local fake puede pasar mientras el flujo Azure falla en el primer salto interno.
 
-Recomendación inicial:
+Recomendacion:
 
-- Mantener tres Container Apps backend: ingest, processing y rag.
-- Usar nombres DNS internos estables equivalentes al compose local.
-- Dejar una alternativa documentada para unificar en un solo backend solo si se decide simplificar arquitectura.
+- Primera opcion: desplegar tres Container Apps backend: `ingest-service`, `processing-service` y `rag-service`.
+- Alternativa: crear un backend unificado, pero solo tras refactor de codigo, compose, tests, rutas y documentacion.
 
-### Variables de entorno inconsistentes
+### Variables de entorno parcialmente alineadas
 
-El backend espera `KEY_VAULT_URL`, pero Terraform inyecta `KEY_VAULT_URI`. El backend espera `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` y `AZURE_OPENAI_CHAT_DEPLOYMENT`, mientras Terraform usa `EMBEDDING_DEPLOYMENT_NAME` y `GPT_DEPLOYMENT_NAME`.
+Tras el ultimo pull de infra, Terraform ya inyecta los nombres principales que espera el backend:
 
-Impacto:
+- `KEY_VAULT_URL`
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`
+- `AZURE_OPENAI_CHAT_DEPLOYMENT`
+- `BLOB_ACCOUNT_URL`
+- `BLOB_CONTAINER_NAME`
+- `USE_FAKE_INTEGRATIONS`
+- `APP_ENV`
+- `APPLICATIONINSIGHTS_CONNECTION_STRING`
 
-- La aplicación puede arrancar sin configuración válida.
-- `pydantic-settings` puede marcar variables requeridas como ausentes.
-- Los errores aparecerán en runtime, no necesariamente en `terraform plan`.
+Persisten tres puntos a cerrar:
 
-Recomendación:
+- `AZURE_OPENAI_API_VERSION`, `QDRANT_COLLECTION` y `LOG_LEVEL` no se inyectan explicitamente.
+- Backend default para Blob es `cv-uploads`, mientras Terraform crea e inyecta `pdfs`.
+- `QDRANT_URL` se inyecta como URL `https` de Qdrant con ingress interno; hay que validarla desde processing/rag y confirmar que el cliente Qdrant funciona con esa ruta.
 
-- Hacer que Terraform inyecte exactamente los nombres definidos por `app/shared/config.py`.
-- Evitar alias múltiples salvo que haya una razón de compatibilidad explícita.
+Recomendacion:
+
+- Mantener los nombres actuales alineados con `app/shared/config.py`.
+- Inyectar explicitamente `AZURE_OPENAI_API_VERSION`, `QDRANT_COLLECTION` y `LOG_LEVEL` para evitar defaults implicitos.
+- Decidir si `BLOB_CONTAINER_NAME` sera `pdfs` o `cv-uploads`; reflejarlo en `.env.example`, Terraform y despliegue.
+- Validar `QDRANT_URL` real desde ambos servicios backend.
 
 ### Estrategia de secretos e identidad no cerrada
 
-El código usa `get_secret()` contra Key Vault para recuperar secretos como claves de Azure OpenAI y Qdrant. Terraform, sin embargo, concede permisos RBAC a Managed Identity y no evidencia la creación de esos secretos.
+El codigo actual usa `get_secret("qdrant-api-key")` y `get_secret("azure-openai-api-key")` con Key Vault en modo real.
 
-Impacto:
+La infra concede RBAC a Managed Identity para Storage, pero no queda cerrada la estrategia para OpenAI/Qdrant ni la creacion de secretos.
 
-- El backend puede tener permisos RBAC pero seguir buscando secretos inexistentes.
-- Azure OpenAI puede estar preparado para autenticación por identidad, mientras el código usa API key.
-- Se puede duplicar innecesariamente la estrategia de seguridad.
+Recomendacion:
 
-Recomendación:
-
-- Decidir explícitamente entre:
-  - API keys almacenadas en Key Vault;
-  - Managed Identity con autenticación Entra ID;
-  - modo híbrido temporal solo para migración.
-
-### Blob Storage no validado en modo real
-
-En local fake, el almacenamiento se simula con un volumen compartido. En Azure, el flujo dependerá de:
-
-- existencia del contenedor Blob correcto;
-- permisos de la Managed Identity;
-- resolución DNS y Private Endpoint si se endurece red;
-- compatibilidad exacta de la llamada al SDK de Azure Blob.
-
-Impacto:
-
-- El upload puede funcionar en fake y fallar en Azure por permisos, nombre de contenedor o red.
-- Processing puede no descargar el blob aunque ingest lo haya aceptado.
-
-Recomendación:
-
-- Validar primero upload/download real con un smoke test mínimo antes de ejecutar el flujo completo.
-
-### Qdrant en Azure no se inicializa igual que en fake
-
-El repositorio de Qdrant crea colección automáticamente en modo fake, pero no necesariamente en modo real. Además, la dimensión vectorial debe coincidir con el modelo de embeddings desplegado.
-
-Impacto:
-
-- Upsert fallará si la colección no existe.
-- Search fallará o devolverá resultados inválidos si la dimensión no coincide.
-- Cambiar de `text-embedding-3-large` a `text-embedding-3-small` sin ajustar dimensión puede romper la persistencia.
-
-Recomendación:
-
-- Definir una fase explícita de bootstrap o verificación de colección.
-- Documentar dimensión esperada según deployment OpenAI.
-- Validar upsert/search real antes del flujo end-to-end.
-
-### Estado de documentos en memoria
-
-El estado de documentos está almacenado en memoria dentro del servicio de ingest. Esto es suficiente para pruebas locales, pero no para Azure con escalado, reinicios o múltiples réplicas.
-
-Impacto:
-
-- El estado se pierde si el contenedor reinicia.
-- Varias réplicas pueden mostrar estados inconsistentes.
-- El frontend no podrá confiar en `/upload/{doc_id}/status` en producción.
-
-Recomendación:
-
-- Antes de escalar réplicas, persistir estado en un recurso compartido: Azure Table Storage, Cosmos DB, PostgreSQL o una cola/event log con estado materializado.
-
-### Frontend no alineado con backend
-
-El frontend mantiene rutas mock y contratos que no coinciden con el backend actual.
-
-Impacto:
-
-- Backend puede estar correctamente desplegado en Azure y aun así la demo end-to-end fallar desde Streamlit.
-- Las evidencias del frontend no validarán el flujo real si `use_mock=True`.
-
-Recomendación:
-
-- Alinear cliente API con los endpoints reales o crear un gateway estable.
-- Desactivar mocks en una configuración clara de entorno dev Azure.
+- Para primera validacion rapida: API keys en Key Vault con nombres exactos documentados.
+- Para version robusta: Managed Identity/RBAC donde SDKs y LlamaIndex lo soporten bien.
+- No mezclar ambas estrategias sin documentar la razon.
 
 ### Activacion accidental del modo fake
 
-El modo `local_fake` es util para desarrollo e integracion local, pero seria incorrecto
-activarlo en un entorno productivo porque sustituye Blob, Azure OpenAI, Key Vault y parte
-del comportamiento RAG por adaptadores locales deterministas.
+El modo fake esta controlado por `USE_FAKE_INTEGRATIONS`, pero no existe aun bloqueo productivo.
 
 Impacto:
 
-- El sistema podria aceptar y procesar documentos sin usar recursos cloud reales.
-- Las respuestas RAG no tendrian calidad semantica real.
-- Las evidencias obtenidas no representarian el comportamiento productivo.
+- Un entorno Azure podria arrancar por error con Blob local y embeddings deterministas si se configura mal.
 
-Mitigacion actual:
+Recomendacion:
 
-- La logica fake esta separada en `FakeProcessingService`, `FakeRagService` y `app/shared/fakes.py`.
-- Los servicios principales `ProcessingService` y `RagService` quedan orientados a produccion.
-- La configuracion falla al arrancar si `APP_ENV` es `production`, `prod` o `pro` y `USE_FAKE_INTEGRATIONS=true`.
+- Anadir validacion en `Settings` para fallar si `APP_ENV in {"production", "prod", "pro"}` y `USE_FAKE_INTEGRATIONS=true`.
+- Fijar `USE_FAKE_INTEGRATIONS=false` desde Terraform para cualquier entorno Azure real.
 
-Recomendación:
+### Estado documental no persistente
 
-- Mantener `USE_FAKE_INTEGRATIONS=false` en Terraform para cualquier entorno Azure real.
-- No desplegar `docker-compose.local-fake.yml`.
-- Añadir una validacion de variables en CI/CD antes del despliegue.
+El estado de `/upload/{doc_id}/status` vive en memoria del `ingest-service`.
 
-## 5. Arquitectura Objetivo
+Impacto:
 
-La arquitectura recomendada para la primera integración Azure es mantener la misma separación lógica que ya existe en backend:
+- Se pierde con reinicios.
+- Es inconsistente con multiples replicas.
+- No refleja finalizacion real del processing.
 
-- Azure Container App `ingest-service`.
-- Azure Container App `processing-service`.
-- Azure Container App `rag-service`.
-- Azure Container App interna para Qdrant.
-- Azure File Share para persistencia de Qdrant.
-- Azure Blob Storage para PDFs.
-- Azure OpenAI para embeddings y chat.
-- Azure Key Vault y/o Managed Identity para secretos y autenticación.
-- Azure Container Registry para imágenes.
-- Application Insights y Log Analytics para observabilidad.
-- Frontend Streamlit en Azure Container Apps apuntando a la API real.
+Recomendacion:
 
-### Flujo objetivo
+- Persistir estado en Azure Table Storage, Cosmos DB, PostgreSQL o un event log/cola con estado materializado.
+- Antes de eso, mantener replicas backend en 1 para pruebas.
 
-1. El frontend envía PDFs al endpoint público o interno de `ingest-service`.
-2. `ingest-service` valida y sube cada PDF a Azure Blob Storage.
-3. `ingest-service` registra el estado inicial del documento.
-4. `ingest-service` dispara `processing-service` con `doc_id` y `blob_name`.
-5. `processing-service` descarga el PDF desde Blob Storage.
+### Qdrant real necesita bootstrap explicito
+
+`processing_service` crea la coleccion automaticamente solo en modo fake. En modo real, `_ensure_collection()` retorna sin crearla.
+
+Impacto:
+
+- El primer upsert real fallara si la coleccion no existe.
+- La dimension debe coincidir con el modelo de embedding real.
+
+Recomendacion:
+
+- Crear bootstrap o smoke test de Qdrant en Azure.
+- Documentar dimension esperada: `text-embedding-3-small` usa 1536 dimensiones.
+
+## 5. Arquitectura objetivo recomendada
+
+Para la primera integracion Azure, mantener separacion por servicio:
+
+- Container App `ingest-service`
+- Container App `processing-service`
+- Container App `rag-service`
+- Container App `qdrant` con Azure File Share
+- Azure Blob Storage para PDFs
+- Azure OpenAI para embeddings y chat
+- Key Vault y/o Managed Identity
+- ACR para imagenes reales
+- Log Analytics/Application Insights
+- Frontend Streamlit apuntando a endpoints reales
+
+Flujo objetivo:
+
+1. Frontend envia PDFs a `POST /upload`.
+2. `ingest-service` valida y sube cada PDF a Blob Storage.
+3. `ingest-service` registra estado inicial en store persistente.
+4. `ingest-service` invoca `processing-service`.
+5. `processing-service` descarga el PDF.
 6. `processing-service` extrae texto y metadata.
 7. `processing-service` crea chunks.
 8. `processing-service` genera embeddings con Azure OpenAI.
-9. `processing-service` persiste vectores y payload en Qdrant.
-10. `rag-service` recibe consultas del frontend.
-11. `rag-service` genera embedding de la consulta.
-12. `rag-service` busca en Qdrant.
-13. `rag-service` genera o estructura la respuesta final.
-14. Todos los servicios emiten logs estructurados con eventos trazables.
+9. `processing-service` hace upsert en Qdrant.
+10. `rag-service` recibe `POST /search`.
+11. `rag-service` consulta Qdrant y usa Azure OpenAI chat.
+12. Los tres servicios emiten logs trazables por `doc_id` o `correlation_id`.
 
-### Separacion entre runtime real y runtime local fake
-
-La arquitectura objetivo para Azure debe desplegar solo el runtime real:
-
-- `ProcessingService` para embeddings con Azure OpenAI.
-- `RagService` para busqueda RAG real con LlamaIndex, Azure OpenAI y Qdrant.
-- Repositorios Blob/Qdrant configurados con endpoints y credenciales reales.
-
-El runtime local fake queda reservado para validacion local:
-
-- `FakeProcessingService` genera embeddings deterministas.
-- `FakeRagService` consulta Qdrant directamente y genera respuestas locales.
-- `app/shared/fakes.py` sustituye Blob/OpenAI en desarrollo.
-- `docker-compose.local-fake.yml` activa `APP_ENV=local_fake` y `USE_FAKE_INTEGRATIONS=true`.
-
-La seleccion se hace al arrancar los routers con `USE_FAKE_INTEGRATIONS`. En Azure real,
-Terraform debe fijar siempre `USE_FAKE_INTEGRATIONS=false`. Si por error se configura
-`APP_ENV=production` junto con `USE_FAKE_INTEGRATIONS=true`, la aplicacion debe fallar al
-arrancar.
-
-### Matriz de decisión de topología backend
-
-| Opción | Descripción | Ventajas | Riesgos | Recomendación |
-|   ---  |      ---    |   ---    |   ---   |      ---      |
-| A | Tres Container Apps: ingest, processing y rag | Respeta arquitectura actual, facilita logs por servicio, minimiza refactor funcional | Más recursos, más configuración Terraform | Recomendada para primera integración |
-| B | Un único backend FastAPI con routers de ingest, processing y rag | Despliegue más simple, menos DNS interno | Requiere refactor, mezcla responsabilidades, cambia supuestos del test local fake | Solo si se decide simplificar producto |
-
-La recomendación inicial es la opción A.
-
-## 6. Fases de Integración
+## 6. Fases de integracion
 
 ### Fase 0 - Congelar baseline local fake
 
-Objetivo:
-
-Garantizar que existe una referencia funcional estable antes de introducir recursos Azure.
-
 Tareas:
 
-- Ejecutar el test `local_fake`.
-- Confirmar que se generan logs bajo `tests/integration/logs/`.
-- Confirmar que aparecen los eventos clave del flujo.
-- Confirmar que el `doc_id` subido aparece en el resultado RAG.
+- Levantar stack local fake.
+- Ejecutar tests unitarios.
+- Ejecutar tests de integracion.
+- Verificar evidencias automaticas de unitarios y E2E.
 
-Validación:
+Comandos:
 
 ```bash
-/home/jldom/TFM/TalentRefine/TR_Env/bin/pytest tests/integration/test_local_fake_flow.py -m integration -v
+make test-unit
+make test-fake-flow
 ```
 
-Criterios de aceptación:
+Criterios:
 
-- El test pasa.
-- Existe `flow_evidence.txt`.
-- Los logs contienen eventos como `document_upload_accepted`, `processing_started`, `chunks_created`, `qdrant_upsert_completed`, `rag_search_started`, `qdrant_search_completed` y `rag_search_completed`.
+- Unit tests pasan.
+- Integration tests pasan contra servicios locales.
+- `POST /upload` dispara processing automaticamente.
+- `POST /search` devuelve el candidato correspondiente al `doc_id` subido.
+- Las evidencias quedan en `tests/unit/logs/` y `tests/integration/logs/`.
+- No aparecen patrones criticos en logs de `processing-service`.
 
-Evidencia:
-
-- Carpeta local `tests/integration/logs/local_fake_flow_<timestamp>/`.
-
-### Fase 1 - Alinear contratos de configuración
-
-Objetivo:
-
-Hacer que backend, Terraform y documentación usen los mismos nombres de variables.
+### Fase 1 - Alinear configuracion
 
 Tareas:
 
-- Revisar `app/shared/config.py` como fuente de verdad de variables backend.
-- Actualizar Terraform para inyectar nombres compatibles con el backend.
-- Eliminar o justificar aliases como `KEY_VAULT_URI`, `EMBEDDING_DEPLOYMENT_NAME` y `GPT_DEPLOYMENT_NAME`.
-- Alinear `BLOB_CONTAINER_NAME` con el contenedor real creado por Terraform.
+- Tomar `app/shared/config.py` como contrato.
+- Mantener en Terraform los nombres ya alineados: `KEY_VAULT_URL`, `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`, `AZURE_OPENAI_CHAT_DEPLOYMENT`, `BLOB_ACCOUNT_URL` y `BLOB_CONTAINER_NAME`.
+- Inyectar tambien `AZURE_OPENAI_API_VERSION`, `QDRANT_COLLECTION` y `LOG_LEVEL`.
+- Resolver el nombre final del contenedor Blob.
+- Anadir validacion anti-fake en produccion.
 
-Validación:
+Criterios:
 
-- Revisar `terraform plan`.
-- Revisar variables disponibles en Container Apps.
-- Arrancar los contenedores con `USE_FAKE_INTEGRATIONS=false` en un entorno de prueba controlado para detectar errores de configuración temprano.
+- `.env.example`, backend y Terraform usan los mismos nombres.
+- Azure real fija `USE_FAKE_INTEGRATIONS=false`.
+- No quedan defaults criticos dependientes de valores implicitos del backend.
+- Produccion falla al arrancar si fake esta activado.
 
-Criterios de aceptación:
-
-- Cada variable obligatoria del backend tiene un valor definido por Terraform o por configuración segura.
-- No hay dependencia implícita de nombres antiguos.
-- La documentación de `.env.example`, Terraform y backend coincide.
-- `USE_FAKE_INTEGRATIONS=false` queda fijado para cualquier despliegue Azure real.
-- Un intento de arrancar con `APP_ENV=production` y `USE_FAKE_INTEGRATIONS=true` falla de forma explícita.
-
-Evidencia:
-
-- Captura o salida de `terraform plan`.
-- Lista de variables efectivas por Container App.
-- Log de arranque o prueba de configuracion que demuestre el bloqueo del modo fake en produccion.
-
-### Fase 2 - Decidir y materializar topología Azure backend
-
-Objetivo:
-
-Desplegar una topología Azure coherente con la arquitectura del backend.
+### Fase 2 - Alinear topologia de Container Apps
 
 Tareas:
 
-- Crear tres Container Apps backend o rediseñar explícitamente a un backend único.
-- Si se mantiene la arquitectura actual, definir:
-  - `ingest-service`;
-  - `processing-service`;
-  - `rag-service`.
-- Configurar imágenes reales desde ACR, no imágenes placeholder.
-- Definir DNS interno o URLs internas entre servicios.
-- Sustituir referencias hardcodeadas si no coinciden con nombres Azure.
+- Sustituir el Container App unico `backend` o complementarlo con tres apps reales.
+- Construir y publicar imagenes reales de:
+  - `app/ingest_service/Dockerfile`
+  - `app/processing_service/Dockerfile`
+  - `app/rag_service/Dockerfile`
+- Definir URL interna de `processing-service` y evitar hardcode exclusivo de Docker Compose si Azure necesita otro nombre.
+- Mantener Qdrant con persistencia en Azure File Share.
 
-Validación:
+Criterios:
 
-- Cada servicio arranca.
-- Cada servicio expone `/health` si se incorpora healthcheck HTTP.
-- `ingest-service` puede alcanzar `processing-service`.
-- `rag-service` puede alcanzar Qdrant.
+- No quedan imagenes placeholder en backend.
+- Cada servicio responde `/health`.
+- `ingest-service` alcanza a `processing-service`.
+- `rag-service` alcanza Qdrant.
 
-Criterios de aceptación:
-
-- No queda ningún Container App backend con imagen placeholder.
-- La topología desplegada coincide con la arquitectura documentada.
-- Los logs permiten distinguir servicio, logger y entorno.
-
-Evidencia:
-
-- Revisión de Azure Container Apps.
-- Logs de arranque por servicio en Log Analytics.
-
-### Fase 3 - Integrar Azure Blob Storage real
-
-Objetivo:
-
-Sustituir el almacenamiento fake por Azure Blob Storage real en ingest y processing.
+### Fase 3 - Validar Blob Storage real
 
 Tareas:
 
-- Confirmar el nombre final del contenedor Blob.
 - Confirmar `BLOB_ACCOUNT_URL`.
-- Confirmar permisos de escritura y lectura para la identidad usada por los servicios.
-- Validar upload desde `ingest-service`.
-- Validar download desde `processing-service`.
-- Añadir un smoke test de Blob que no dependa de OpenAI ni Qdrant.
+- Confirmar `BLOB_CONTAINER_NAME`.
+- Confirmar permisos de escritura para ingest.
+- Confirmar permisos de lectura para processing.
+- Crear smoke test upload/download sin OpenAI ni Qdrant.
 
-Validación:
+Criterios:
 
-- Subir un PDF pequeño a Blob.
-- Descargar el mismo blob desde processing.
-- Comparar tamaño y hash si procede.
+- Ingest escribe en Blob.
+- Processing lee el mismo blob.
+- Logs incluyen `doc_id` y `blob_name`.
 
-Criterios de aceptación:
-
-- `ingest-service` puede escribir en el contenedor.
-- `processing-service` puede leer el blob.
-- Los errores de permisos se registran claramente.
-- Los logs incluyen `doc_id` y `blob_name`.
-
-Evidencia:
-
-- Log de upload.
-- Log de download.
-- Comprobación del blob en Azure Storage.
-
-### Fase 4 - Integrar Key Vault y estrategia de secretos/identidad
-
-Objetivo:
-
-Cerrar una estrategia única y verificable para autenticación y secretos.
+### Fase 4 - Cerrar identidad y secretos
 
 Tareas:
 
-- Decidir si Azure OpenAI se autentica con API key en Key Vault o con Managed Identity.
-- Decidir si Qdrant necesita API key o se mantiene como servicio interno sin API key en dev.
-- Si se usan secretos:
-  - crear secretos en Key Vault;
-  - documentar nombres exactos;
-  - validar lectura desde Container Apps.
-- Si se usa Managed Identity:
-  - adaptar código para token auth donde aplique;
-  - retirar lecturas innecesarias de Key Vault.
+- Elegir API keys en Key Vault o Managed Identity.
+- Si se usa Key Vault, crear/documentar:
+  - `azure-openai-api-key`
+  - `qdrant-api-key` si aplica
+- Validar lectura desde contenedores sin imprimir secretos.
 
-Validación:
+Criterios:
 
-- Smoke test de lectura de Key Vault desde el contenedor.
-- Smoke test de autenticación contra Azure OpenAI.
+- La estrategia esta documentada.
+- No hay secretos en variables no seguras ni en logs.
 
-Criterios de aceptación:
-
-- No hay mezcla accidental entre RBAC y API keys.
-- Los secretos requeridos existen.
-- La Managed Identity tiene permisos mínimos necesarios.
-
-Evidencia:
-
-- Logs de lectura correcta de configuración no sensible.
-- Confirmación de acceso sin imprimir secretos.
-
-### Fase 5 - Integrar Azure OpenAI real
-
-Objetivo:
-
-Generar embeddings y respuestas RAG usando deployments reales de Azure OpenAI.
+### Fase 5 - Validar Azure OpenAI real
 
 Tareas:
 
-- Confirmar `AZURE_OPENAI_ENDPOINT`.
-- Confirmar `AZURE_OPENAI_API_VERSION`.
-- Confirmar `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`.
-- Confirmar `AZURE_OPENAI_CHAT_DEPLOYMENT`.
-- Confirmar dimensión del modelo de embedding.
-- Ejecutar una llamada mínima de embedding.
-- Ejecutar una llamada mínima de chat si el flujo RAG la usa.
+- Smoke test de embedding.
+- Smoke test de chat.
+- Confirmar dimension de embeddings.
+- Confirmar version API soportada.
 
-Validación:
+Criterios:
 
-- Smoke test que genere embedding para un texto corto.
-- Validar que la dimensión coincide con Qdrant.
-- Smoke test de chat con prompt mínimo.
+- `processing-service` genera embeddings reales.
+- `rag-service` genera respuesta con chat real.
+- Errores de deployment, permisos o rate limit se registran claramente.
 
-Criterios de aceptación:
-
-- OpenAI responde desde Container Apps.
-- No se imprimen claves en logs.
-- Los errores de rate limit, deployment inexistente o permisos quedan diferenciados.
-- Los servicios desplegados usan `ProcessingService` y `RagService`, no `FakeProcessingService` ni `FakeRagService`.
-
-Evidencia:
-
-- Log de embedding generado con dimensión.
-- Log de respuesta chat resumida, sin datos sensibles.
-
-### Fase 6 - Integrar Qdrant en Azure
-
-Objetivo:
-
-Garantizar que Qdrant desplegado en Azure puede persistir y recuperar vectores reales.
+### Fase 6 - Validar Qdrant en Azure
 
 Tareas:
 
-- Confirmar URL interna de Qdrant.
-- Confirmar si el tráfico debe usar `http` o `https`.
-- Definir política de `min_replicas`; evitar `0` si el cold start rompe pruebas.
-- Confirmar persistencia en Azure File Share.
-- Crear o verificar colección real.
-- Alinear dimensión vectorial con Azure OpenAI.
-
-Validación:
-
-- Crear colección si no existe.
-- Hacer upsert de un punto de prueba.
-- Hacer search contra ese punto.
+- Confirmar URL interna y protocolo.
+- Crear/verificar coleccion con dimension 1536.
+- Ejecutar upsert/search de prueba.
 - Reiniciar Qdrant y validar persistencia.
 
-Criterios de aceptación:
+Criterios:
 
-- Qdrant responde desde `processing-service` y `rag-service`.
-- La colección existe con dimensión correcta.
-- Los datos sobreviven a reinicio del contenedor.
-
-Evidencia:
-
-- Logs de creación/verificación de colección.
-- Resultado de upsert/search.
-- Evidencia de persistencia tras reinicio.
+- Processing puede hacer upsert.
+- Rag puede buscar.
+- Datos sobreviven reinicio.
 
 ### Fase 7 - Endurecer observabilidad
 
-Objetivo:
-
-Conseguir que el flujo Azure genere evidencias tan claras como el flujo local fake.
-
 Tareas:
 
-- Mantener logs estructurados a stdout/stderr.
-- Confirmar ingesta en Log Analytics.
-- Incluir `service`, `environment`, `logger`, `level`, `timestamp`, `doc_id` y `blob_name`.
-- Añadir correlation id si el flujo pasa por varios servicios.
-- Revisar eventos mínimos por fase del flujo.
+- Anadir `environment` a logs.
+- Anadir logs de inicio/fin en RAG.
+- Normalizar eventos o documentar nombres reales.
+- Anadir `duration_ms` para Blob, OpenAI, Qdrant y HTTP interno.
+- Introducir `correlation_id` o propagar `doc_id` donde aplique.
 
-Eventos mínimos esperados:
+Eventos objetivo:
 
 - `document_upload_accepted`
-- `local_blob_uploaded` o equivalente real como `azure_blob_uploaded`
+- `blob_uploaded`
 - `processing_triggered`
-- `processing_started`
+- `indexing_started`
 - `pdf_text_extracted`
-- `chunks_created`
-- `fake_embeddings_generated` solo en fake
-- `azure_embeddings_generated` en real
-- `qdrant_upsert_completed`
+- `chunks_generated`
+- `azure_embeddings_generated`
+- `qdrant_upsert`
 - `rag_search_started`
 - `qdrant_search_completed`
 - `rag_search_completed`
 
-Validación:
-
-- Ejecutar un flujo real en dev.
-- Consultar logs por `doc_id`.
-- Reconstruir el flujo completo desde Log Analytics.
-
-Criterios de aceptación:
-
-- Un único `doc_id` permite seguir upload, processing, indexing y search.
-- Los logs distinguen fake y real.
-- No hay secretos ni contenido sensible completo en logs.
-
-Evidencia:
-
-- Query de Log Analytics.
-- Export o captura de eventos ordenados por timestamp.
-
-### Fase 8 - Alinear frontend con backend real
-
-Objetivo:
-
-Hacer que el frontend consuma contratos reales y deje de depender de mocks para la demo Azure.
+### Fase 8 - Alinear frontend
 
 Tareas:
 
-- Revisar `utils/api_client.py`.
-- Cambiar endpoints a los contratos reales o introducir API gateway.
-- Configurar URL base desde variable de entorno compatible con Azure Container Apps.
-- Desactivar `use_mock=True` en el flujo de integración real.
-- Validar upload y search desde la UI.
+- Alinear cliente frontend con `POST /upload`, `GET /upload/{doc_id}/status` y `POST /search`.
+- O crear gateway/API versionada que exponga rutas `/api/v1/...`.
+- Desactivar mocks en Azure dev.
+- Configurar URLs por entorno.
+- Hacer que `RAGAPIClient` lea `BACKEND_URL`, `INGEST_API_URL` o `RAG_API_URL` desde entorno.
+- Eliminar usos forzados de `get_api_client(use_mock=True)` en vistas que deban probar Azure real.
 
-Validación:
+Criterios:
 
-- Ejecutar frontend apuntando a backend Azure dev.
-- Subir un PDF desde Streamlit.
-- Lanzar consulta RAG.
-- Confirmar que el resultado corresponde al documento procesado.
+- Demo Azure no usa datos mock.
+- Upload y search desde UI llegan al backend real.
+- El frontend desplegado por Terraform aprovecha `BACKEND_URL` o variables equivalentes.
 
-Criterios de aceptación:
-
-- El frontend no usa datos mock en entorno Azure dev.
-- Las rutas llamadas existen en backend.
-- Los errores HTTP se muestran de forma comprensible.
-
-Evidencia:
-
-- Captura de UI o logs de Streamlit.
-- Logs backend correlacionados con la acción del usuario.
-
-### Fase 9 - Añadir pruebas cloud-readiness
-
-Objetivo:
-
-Crear una segunda capa de pruebas que valide recursos Azure reales sin contaminar el test local fake.
+### Fase 9 - Cloud-readiness tests
 
 Tareas:
 
-- Añadir tests marcados como `azure` o `cloud`.
-- Separar credenciales/configuración de entorno.
-- Añadir pruebas por recurso:
+- Anadir marker `azure` en `pyproject.toml`.
+- Crear tests separados de:
   - Blob upload/download;
   - Key Vault read;
-  - Azure OpenAI embedding;
-  - Qdrant upsert/search;
-  - flujo end-to-end Azure dev.
-- Hacer que los tests guarden evidencias similares a `flow_evidence.txt`.
-
-Validación:
-
-```bash
-pytest tests/integration/test_local_fake_flow.py -m integration -v
-pytest tests/integration/test_azure_smoke.py -m azure -v
-pytest tests/integration/test_azure_flow.py -m azure -v
-```
-
-Criterios de aceptación:
-
-- Los tests locales no requieren Azure.
-- Los tests Azure fallan rápido si falta configuración.
-- Las evidencias Azure permiten reconstruir el flujo sin revisar manualmente portales.
-
-Evidencia:
-
-- Carpeta local de logs por ejecución Azure.
-- Logs en Application Insights.
-- Respuestas HTTP resumidas.
-
-## 7. Variables de Entorno Objetivo
-
-| Variable | Consumidor | Propietario | Valor esperado en Azure dev | Observaciones |
-| --- | --- | --- | --- | --- |
-| `KEY_VAULT_URL` | Todos los servicios si se usa Key Vault | Terraform security/compute | URL completa del vault | Sustituir `KEY_VAULT_URI` o soportarlo explícitamente |
-| `BLOB_ACCOUNT_URL` | ingest, processing | Terraform storage/compute | `https://<account>.blob.core.windows.net` | Debe coincidir con la cuenta desplegada |
-| `BLOB_CONTAINER_NAME` | ingest, processing | Terraform storage/compute | `pdfs` o nombre acordado | Backend default actual es `cv-uploads`; Terraform crea `pdfs` |
-| `QDRANT_URL` | processing, rag | Terraform compute | URL interna de Qdrant | Confirmar `http` vs `https` |
-| `QDRANT_COLLECTION` | processing, rag | Backend/Terraform | `talentrefine-candidates` | Debe existir con dimensión correcta |
-| `AZURE_OPENAI_ENDPOINT` | processing, rag | Terraform ai/compute | Endpoint del recurso OpenAI | Debe ser accesible desde Container Apps |
-| `AZURE_OPENAI_API_VERSION` | processing, rag | Backend/Terraform | Versión soportada por SDK | Evitar hardcode no validado |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | processing, rag | Terraform ai/compute | Nombre del deployment de embeddings | Sustituir `EMBEDDING_DEPLOYMENT_NAME` |
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | rag | Terraform ai/compute | Nombre del deployment de chat | Sustituir `GPT_DEPLOYMENT_NAME` |
-| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Todos los servicios | Terraform monitoring/compute | Connection string App Insights | No es secreto crítico, pero debe tratarse como config |
-| `APP_ENV` | Todos los servicios | Terraform compute | `dev` | Distingue logs y comportamiento |
-| `USE_FAKE_INTEGRATIONS` | Todos los servicios | Terraform compute | `false` | En Azure real debe estar desactivado |
-| `LOG_LEVEL` | Todos los servicios | Terraform compute | `INFO` | `DEBUG` solo temporalmente |
-| `AZURE_CLIENT_ID` | Todos los servicios con Managed Identity | Terraform security/compute | Client ID de User Assigned Managed Identity | Necesario para `DefaultAzureCredential` en algunos escenarios |
-
-Regla obligatoria:
-
-- En Azure real, `USE_FAKE_INTEGRATIONS` debe ser siempre `false`.
-- En produccion, `APP_ENV` debe ser `production`, `prod` o `pro`, y la aplicacion no debe arrancar si `USE_FAKE_INTEGRATIONS=true`.
-- El valor `APP_ENV=local_fake` queda reservado exclusivamente para Docker Compose local fake.
-
-## 8. Estrategia de Identidad y Secretos
-
-### Opción A - API keys en Key Vault
-
-Funcionamiento:
-
-- Terraform crea Key Vault.
-- Se crean secretos como `azure-openai-api-key` y `qdrant-api-key`.
-- Los servicios leen secretos con `DefaultAzureCredential`.
-
-Ventajas:
-
-- Encaja con el patrón actual de `get_secret()`.
-- Es simple de entender y depurar.
-- Permite rotación controlada desde Key Vault.
-
-Riesgos:
-
-- Hay que crear y mantener secretos.
-- Se debe evitar imprimir valores sensibles.
-- Duplica parcialmente RBAC si Azure OpenAI también permite identidad.
-
-### Opción B - Managed Identity/RBAC
-
-Funcionamiento:
-
-- Los servicios usan la Managed Identity asignada.
-- Azure OpenAI y Storage autorizan mediante roles.
-- Key Vault queda para secretos que no soporten RBAC nativo o no se usa para OpenAI.
-
-Ventajas:
-
-- Menos secretos.
-- Mejor alineación con prácticas cloud modernas.
-- Menor riesgo de exposición de claves.
-
-Riesgos:
-
-- Puede requerir cambios de código.
-- No todos los SDKs o integraciones de LlamaIndex pueden estar configurados igual que con API key.
-- La depuración inicial puede ser más compleja.
-
-### Recomendación
-
-Para una primera integración rápida, usar API keys en Key Vault si el objetivo prioritario es validar el flujo. Para una versión más robusta, migrar a Managed Identity donde los SDKs lo soporten bien.
-
-La decisión debe cerrarse antes de modificar Terraform o código de autenticación. No se debe asumir que RBAC y API keys son intercambiables.
-
-## 9. Estrategia de Testing
-
-La estrategia recomendada tiene cuatro capas.
-
-### Capa 1 - Local fake
-
-Objetivo:
-
-Validar el flujo backend completo sin Azure.
-
-Debe seguir ejecutándose con:
-
-```bash
-/home/jldom/TFM/TalentRefine/TR_Env/bin/pytest tests/integration/test_local_fake_flow.py -m integration -v
-```
-
-Esta capa detecta regresiones en:
-
-- contratos internos entre servicios;
-- extracción y chunking;
-- escritura/lectura Qdrant local;
-- eventos de logs;
-- forma básica de respuestas HTTP.
-- seleccion controlada de `FakeProcessingService` y `FakeRagService` solo cuando `USE_FAKE_INTEGRATIONS=true`.
-
-No valida:
-
-- permisos Azure;
-- red Azure;
-- Key Vault real;
-- Azure OpenAI real;
-- Blob Storage real;
-- despliegue Container Apps.
-
-La capa local fake no debe usarse como prueba de produccion. Su objetivo es validar
-plumbing tecnico y regresiones de flujo antes de ejecutar pruebas con recursos Azure.
-
-### Capa 2 - Smoke tests Azure por recurso
-
-Objetivo:
-
-Validar cada recurso cloud de forma aislada.
-
-Pruebas mínimas:
-
-- Blob upload/download.
-- Key Vault secret read o token auth.
-- Azure OpenAI embedding.
-- Azure OpenAI chat.
-- Qdrant health/upsert/search.
-
-Estas pruebas deben fallar con mensajes claros si falta configuración.
-
-### Capa 3 - Integración Azure backend
-
-Objetivo:
-
-Validar el flujo backend completo en Azure dev sin depender del frontend.
-
-Secuencia:
-
-1. POST de PDF a `ingest-service`.
-2. Polling de estado o espera controlada.
-3. Consulta a `rag-service`.
-4. Validación de que el resultado corresponde al documento procesado.
-5. Recopilación de logs por `doc_id`.
-
-### Capa 4 - End-to-end Azure con frontend
-
-Objetivo:
-
-Validar experiencia real desde Streamlit.
-
-Condiciones:
-
-- `use_mock=False`.
-- URL backend real.
-- Rutas frontend alineadas.
-- Evidencias backend y frontend correlacionables.
-
-## 10. Observabilidad y Evidencias
-
-La integración Azure debe conservar la filosofía de evidencia del test local fake.
-
-### Eventos mínimos por flujo
-
-| Evento | Servicio | Cuándo debe emitirse |
-| --- | --- | --- |
-| `document_upload_accepted` | ingest | Cuando el PDF es aceptado y se asigna `doc_id` |
-| `azure_blob_uploaded` | ingest | Cuando el PDF queda persistido en Blob Storage |
-| `processing_triggered` | ingest | Cuando se invoca processing |
-| `processing_started` | processing | Al empezar el procesamiento |
-| `pdf_text_extracted` | processing | Tras extraer texto del PDF |
-| `chunks_created` | processing | Tras crear chunks |
-| `azure_embeddings_generated` | processing/rag | Tras generar embeddings reales |
-| `qdrant_upsert_completed` | processing | Tras persistir vectores |
-| `rag_search_started` | rag | Al recibir consulta RAG |
-| `qdrant_search_completed` | rag | Tras consultar Qdrant |
-| `rag_search_completed` | rag | Tras construir respuesta final |
-
-### Campos mínimos de log
-
-- `timestamp`
-- `level`
-- `service`
-- `environment`
-- `logger`
-- `event`
-- `doc_id` cuando exista
-- `blob_name` cuando exista
-- `correlation_id` cuando se introduzca
-- `duration_ms` en llamadas externas relevantes
-- `status_code` en llamadas HTTP entre servicios
-
-### Evidencias esperadas
-
-Para cada ejecución relevante en Azure dev debe poder recuperarse:
-
-- request de upload;
-- `doc_id`;
-- blob persistido;
-- procesamiento completado;
-- número de chunks;
-- dimensión de embeddings;
-- upsert Qdrant;
-- búsqueda RAG;
-- respuesta resumida;
-- errores si los hubo.
-
-No deben registrarse:
-
-- contenido completo de CVs;
-- secretos;
-- API keys;
-- tokens;
-- payloads sensibles completos.
-
-## 11. Checklist Pre-Deploy
-
-- El test `local_fake` pasa.
-- `.env.example` está alineado con `app/shared/config.py`.
-- Terraform inyecta los mismos nombres de variables que espera el backend.
-- Terraform fija `USE_FAKE_INTEGRATIONS=false` en cualquier entorno Azure real.
-- La configuracion bloquea `USE_FAKE_INTEGRATIONS=true` cuando `APP_ENV` es productivo.
-- La topología elegida está cerrada: tres Container Apps o backend único.
-- Las imágenes backend reales se construyen y publican en ACR.
-- Los Container Apps no usan imágenes placeholder.
+  - Azure OpenAI embedding/chat;
+  - Qdrant health/upsert/search;
+  - flujo backend Azure dev.
+- Guardar evidencias de cada ejecucion.
+
+Criterios:
+
+- Tests locales no requieren Azure.
+- Tests Azure fallan rapido si falta configuracion.
+
+## 7. Variables de entorno objetivo
+
+| Variable | Consumidor | Valor esperado en Azure dev | Estado |
+| --- | --- | --- | --- |
+| `KEY_VAULT_URL` | servicios que lean secretos | URL completa del vault | Terraform ya lo inyecta |
+| `BLOB_ACCOUNT_URL` | ingest, processing | `https://<account>.blob.core.windows.net` | Terraform ya lo inyecta |
+| `BLOB_CONTAINER_NAME` | ingest, processing | `pdfs` o `cv-uploads` | Terraform inyecta `pdfs`; decidir si se cambia backend default o se acepta por entorno |
+| `QDRANT_URL` | processing, rag | URL interna de Qdrant | Terraform genera FQDN interno con `https`; falta smoke test |
+| `QDRANT_COLLECTION` | processing, rag | `talentrefine-candidates` | Backend default definido; recomendable inyectar explicitamente |
+| `AZURE_OPENAI_ENDPOINT` | processing, rag | Endpoint OpenAI | Backend y Terraform lo contemplan |
+| `AZURE_OPENAI_API_VERSION` | processing, rag | Version soportada | Backend default `2024-02-15-preview`; recomendable inyectar |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | processing, rag | deployment embeddings | Terraform ya lo inyecta desde `embedding-deployment` |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | rag | deployment chat | Terraform ya lo inyecta desde `gpt-deployment` |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | todos | connection string | No consumida aun por codigo, util para runtime Azure |
+| `APP_ENV` | todos | `development` o `dev` | Terraform inyecta `development`; backend lo lee, falta uso en logs/validacion |
+| `USE_FAKE_INTEGRATIONS` | todos | `false` | Terraform ya lo fija en `false` para backend |
+| `LOG_LEVEL` | todos | `INFO` | Backend lo soporta; Terraform no lo inyecta explicitamente |
+| `AZURE_CLIENT_ID` | servicios con UAMI | client id | Necesario si se usa User Assigned Managed Identity |
+| `BACKEND_URL` | frontend | URL backend o gateway | Terraform lo inyecta, pero frontend actual no lo consume |
+
+## 8. Checklists
+
+### Pre-deploy
+
+- Tests locales pasan.
+- `.env.example` coincide con `app/shared/config.py`.
+- Terraform usa nombres de variables backend.
 - `USE_FAKE_INTEGRATIONS=false` en Azure.
-- `APP_ENV` no usa `local_fake` en Azure.
-- `APP_ENV=dev` en el primer entorno cloud.
-- Blob container existe y coincide con `BLOB_CONTAINER_NAME`.
-- La identidad tiene permisos sobre Storage.
-- Key Vault existe y la estrategia de secretos está cerrada.
-- Azure OpenAI tiene deployments reales y nombres conocidos.
-- Qdrant tiene persistencia configurada.
-- Qdrant tiene colección con dimensión correcta o bootstrap definido.
-- Application Insights y Log Analytics están conectados.
-- Frontend tiene una URL backend real configurada.
-- Los mocks del frontend no se usan en la prueba Azure.
+- Validacion anti-fake productiva implementada.
+- Topologia cerrada: tres Container Apps o backend unificado refactorizado.
+- Imagenes reales publicadas en ACR.
+- Blob container creado y nombre alineado.
+- Estrategia Key Vault/Managed Identity cerrada.
+- Deployments Azure OpenAI existentes.
+- Qdrant con persistencia y bootstrap de coleccion.
+- Frontend sin mocks para prueba Azure.
 
-## 12. Checklist Post-Deploy
+### Post-deploy
 
-- Los tres servicios backend arrancan sin errores de configuración.
-- Los logs aparecen en Log Analytics.
+- Los tres servicios responden `/health`.
+- Logs aparecen en Log Analytics.
+- Blob upload/download funciona desde contenedores.
+- OpenAI responde desde processing y rag.
 - Qdrant responde desde processing y rag.
-- Blob upload/download funciona desde los contenedores.
-- Azure OpenAI responde desde processing y rag.
-- Key Vault o Managed Identity funcionan según la estrategia elegida.
-- Un PDF real puede subirse desde backend.
-- El procesamiento completa extracción, chunking, embeddings y upsert.
-- Una consulta RAG devuelve resultados asociados al documento procesado.
-- Se puede reconstruir todo el flujo buscando por `doc_id`.
-- El frontend puede ejecutar upload y búsqueda sin mocks.
-- Los errores se registran sin secretos ni datos sensibles.
-- No aparecen logs `mode=local_fake` ni eventos exclusivos del fake en entornos Azure reales.
+- Un PDF puede indexarse completo.
+- `POST /search` devuelve resultados del documento indexado.
+- El flujo se reconstruye por `doc_id` o `correlation_id`.
+- No aparecen eventos fake en entorno Azure real.
 
-## 13. Decisiones Pendientes
+## 9. Decisiones pendientes
 
-1. Confirmar topología final de backend en Azure:
+1. Topologia final en Azure:
    - tres Container Apps;
-   - o backend unificado.
+   - o backend unificado tras refactor.
 
-2. Confirmar estrategia de autenticación:
+2. Nombre definitivo de Blob container:
+   - `pdfs`;
+   - o `cv-uploads`.
+
+3. Estrategia de secretos:
    - API keys en Key Vault;
-   - Managed Identity;
-   - híbrido temporal.
+   - Managed Identity/RBAC;
+   - hibrida temporal documentada.
 
-3. Confirmar nombre definitivo del contenedor Blob:
-   - mantener `pdfs`;
-   - o cambiar Terraform a `cv-uploads`;
-   - o cambiar backend default/documentación.
-
-4. Confirmar nombres definitivos de deployments Azure OpenAI:
-   - `embedding-deployment` y `gpt-deployment`;
-   - o nombres alineados con modelos.
-
-5. Confirmar modelo de embeddings y dimensión vectorial:
-   - `text-embedding-3-small`;
-   - `text-embedding-3-large`;
-   - otra opción.
-
-6. Confirmar cómo se inicializa Qdrant en modo real:
-   - Terraform/provisioning;
-   - bootstrap de aplicación;
-   - script operativo previo al despliegue.
-
-7. Confirmar persistencia de estado documental:
-   - mantener memoria solo en dev inicial;
+4. Persistencia de estado documental:
    - Azure Table Storage;
    - Cosmos DB;
    - PostgreSQL;
-   - cola/event log más estado materializado.
+   - cola/event log con estado materializado.
 
-8. Confirmar contrato público frontend-backend:
-   - adaptar frontend a `/upload` y `/search`;
-   - o crear gateway `/api/v1/...`.
+5. Contrato frontend:
+   - consumir rutas actuales;
+   - o introducir gateway `/api/v1`.
 
-## No Hacer Todavía
+6. Normalizacion de eventos de log:
+   - adaptar codigo a nombres objetivo;
+   - o actualizar tests/evidencias a nombres reales.
 
-- No borrar `local_fake`.
-- No integrar Azure real dentro del test `local_fake`.
-- No mezclar evidencias de mocks frontend con evidencias backend.
-- No asumir que RBAC y API keys son equivalentes.
-- No desplegar con `USE_FAKE_INTEGRATIONS=true`.
-- No usar `APP_ENV=local_fake` fuera de Docker Compose local.
-- No escalar Container Apps backend sin resolver persistencia de estado.
-- No cambiar rutas HTTP públicas sin coordinar frontend y tests.
-- No registrar contenido completo de CVs en logs.
-- No versionar logs generados localmente.
-- No usar imágenes placeholder para validar una integración funcional.
+## 10. Proxima accion recomendada
+
+Antes de tocar Azure, cerrar y ejecutar esta secuencia en `dev`:
+
+1. Implementar bloqueo anti-fake productivo en `app/shared/config.py`.
+2. Anadir `environment` a logs.
+3. Decidir `BLOB_CONTAINER_NAME`.
+4. Alinear Terraform con variables reales del backend.
+5. Dividir compute en tres Container Apps o documentar refactor a backend unico.
+6. Ejecutar unit + local fake como baseline.
+
+Con eso, la primera prueba Azure dejara de depender de supuestos desactualizados y pasara a validar el backend que realmente existe en la rama `dev`.
+
+## 11. Checklist ejecutivo ordenado
+
+1. Confirmar baseline local:
+   - Ejecutar `make test-unit`.
+   - Ejecutar `make test-fake-flow`.
+   - Revisar evidencias en `tests/unit/logs/` y `tests/integration/logs/`.
+
+2. Bloquear configuraciones peligrosas:
+   - Implementar fallo de arranque si `USE_FAKE_INTEGRATIONS=true` y `APP_ENV` es `production`, `prod` o `pro`.
+   - Verificar que Terraform mantiene `USE_FAKE_INTEGRATIONS=false` en Azure.
+
+3. Cerrar contratos de configuracion:
+   - Alinear `.env.example`, Terraform y `app/shared/config.py`.
+   - Decidir `BLOB_CONTAINER_NAME`: `pdfs` o `cv-uploads`.
+   - Inyectar explicitamente `AZURE_OPENAI_API_VERSION`, `QDRANT_COLLECTION` y `LOG_LEVEL`.
+
+4. Decidir topologia Azure:
+   - Elegir tres Container Apps backend o backend unificado.
+   - Si se mantienen tres servicios, definir URLs internas de `ingest-service`, `processing-service` y `rag-service`.
+   - Sustituir imagenes placeholder por imagenes reales publicadas en ACR.
+
+5. Preparar dependencias cloud:
+   - Validar Blob Storage con permisos de escritura para ingest y lectura para processing.
+   - Crear o validar secretos `azure-openai-api-key` y `qdrant-api-key` si aplica.
+   - Crear o verificar coleccion Qdrant con dimension compatible con el modelo real.
+
+6. Ejecutar smoke tests Azure por componente:
+   - Blob upload/download.
+   - Key Vault read.
+   - Azure OpenAI embedding/chat.
+   - Qdrant health/upsert/search.
+   - Healthcheck de cada microservicio desplegado.
+
+7. Probar flujo backend Azure completo:
+   - Subir PDF con `POST /upload`.
+   - Confirmar que processing se dispara y completa.
+   - Consultar `POST /search`.
+   - Verificar que el resultado corresponde al documento indexado.
+
+8. Endurecer observabilidad:
+   - Anadir `environment`, `correlation_id` o `doc_id` consistente.
+   - Registrar inicio/fin de RAG.
+   - Medir `duration_ms` en Blob, OpenAI, Qdrant y llamadas HTTP internas.
+
+9. Alinear frontend:
+   - Decidir si consumira rutas actuales o un gateway `/api/v1`.
+   - Eliminar mocks forzados en la demo Azure.
+   - Hacer que el cliente use URLs de entorno desplegadas por Terraform.
+
+10. Preparar aceptacion final:
+    - Guardar evidencias de tests locales y Azure.
+    - Revisar logs en Log Analytics/Application Insights.
+    - Confirmar ausencia de eventos fake en Azure real.
+    - Documentar decisiones finales de topologia, secretos, Blob container y contrato frontend.

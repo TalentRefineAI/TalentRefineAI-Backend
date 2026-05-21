@@ -10,11 +10,14 @@
 #   make down      ->  para y elimina los contenedores
 #   make logs      ->  muestra los logs en tiempo real de todos los servicios
 #   make ps        ->  estado de los contenedores
+#   make test-unit ->  ejecuta unitarios y guarda evidencias en tests/unit/logs
+#   make test-fake-flow -> ejecuta E2E local_fake y guarda evidencias Docker
 
-PYTHON := .venv/Scripts/python
-UVICORN := .venv/Scripts/uvicorn
+PYTHON ?= python
+UVICORN ?= uvicorn
+PYTEST_BIN ?= python -m pytest
 
-.PHONY: dev dev-fake stop ingest processing rag start build down logs ps
+.PHONY: dev dev-fake stop ingest processing rag start build down logs ps test-unit test-fake-flow test-fake-all
 
 # Levanta solo el ingest-service. Solo requiere az login + Blob Storage real.
 # QDRANT_URL, KEY_VAULT_URL y AZURE_OPENAI_ENDPOINT pueden ser valores dummy en .env
@@ -76,3 +79,14 @@ logs:
 # Estado de los contenedores Docker
 ps:
 	docker compose ps
+
+# Unitarios sin Docker ni Azure. Generan evidencias en tests/unit/logs/
+test-unit:
+	$(PYTEST_BIN) tests/unit -v
+
+# E2E backend local_fake. Levanta y detiene su propio stack Docker.
+test-fake-flow:
+	$(PYTEST_BIN) tests/integration/local_fake -m integration -v
+
+# Suite fake completa: unitarios + E2E backend local_fake.
+test-fake-all: test-unit test-fake-flow

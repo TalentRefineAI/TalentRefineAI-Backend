@@ -195,6 +195,7 @@ cython_debug/
 
 # Local integration evidence
 tests/integration/logs/
+tests/unit/logs/
 
 # PyPI configuration file
 .pypirc
