@@ -22,13 +22,13 @@ POST /upload
   -> almacenamiento local fake
   -> llamada HTTP real a processing_service
   -> extraccion real de PDF con PyMuPDF y metadata con pypdf
-  -> chunking real con RecursiveCharacterTextSplitter
+  -> chunking real con LlamaIndex SentenceSplitter
   -> embeddings fake deterministas
   -> persistencia real en Qdrant local
   -> POST /search
   -> rag_service real
   -> busqueda real en Qdrant local
-  -> respuesta con summary/reason fake
+  -> respuesta con summary/justification fake
 ```
 
 Esto permite probar features reales del backend sin coste ni dependencia cloud.
@@ -83,22 +83,18 @@ El embedding fake no representa semantica real, pero sirve para probar que el ba
 
 ### 3. Aislamiento entre servicios reales y servicios fake
 
-El modo `local_fake` esta aislado de la logica principal de los servicios de negocio.
-La seleccion entre implementacion real y fake se hace en los routers al arrancar cada
-microservicio, leyendo `USE_FAKE_INTEGRATIONS`.
+El modo `local_fake` esta limitado a adaptadores y ramas controladas por
+`USE_FAKE_INTEGRATIONS`, sin crear clases fake productivas separadas.
 
 En concreto:
 
-- `processing_service/services/processing_service.py` contiene el pipeline principal orientado a Azure OpenAI.
-- `processing_service/services/fake_processing_service.py` hereda el pipeline comun y solo sustituye la generacion de embeddings por vectores deterministas.
-- `rag_service/services/rag_service.py` contiene el flujo RAG real con LlamaIndex, Azure OpenAI y Qdrant.
-- `rag_service/services/fake_rag_service.py` contiene la busqueda local fake contra Qdrant y genera `summary`/`reason` sin llamar a GPT.
+- `processing_service/services/indexing_service.py` mantiene el pipeline real y, en fake, sustituye embeddings Azure OpenAI por `fake_embedding()`.
+- `rag_service/services/rag_engine.py` mantiene el flujo RAG real y, en fake, consulta Qdrant con embeddings deterministicos y genera `summary`/`justification` localmente.
+- Los repositorios Blob cambian entre disco local y Azure Blob segun `USE_FAKE_INTEGRATIONS`.
 - `app/shared/fakes.py` concentra utilidades fake compartidas como Blob local y embeddings deterministas.
 
-Esto evita que la logica fake quede mezclada dentro de los servicios principales y
-allana el camino hacia produccion. Los servicios principales quedan preparados para
-integrarse con Azure, mientras que los servicios fake quedan como adaptadores de
-validacion local.
+Esto mantiene estable el codigo funcional de los microservicios que pasara a produccion,
+pero permite validar el plumbing local sin Azure.
 
 ---
 
@@ -139,27 +135,26 @@ En modo fake:
 El pipeline de processing sigue siendo real:
 
 ```text
-download -> PyMuPDF + pypdf metadata -> RecursiveCharacterTextSplitter -> upsert_nodes
+download -> PyMuPDF + pypdf metadata -> LlamaIndex SentenceSplitter -> upsert_nodes
 ```
 
-En modo real, `ProcessingService` genera embeddings con Azure OpenAI.
+En modo real, `IndexingService` genera embeddings con Azure OpenAI.
 
-En modo local fake, el router usa `FakeProcessingService`, que reutiliza el pipeline comun
-de descarga, extraccion, limpieza, chunking y persistencia, pero sustituye la generacion
-de embeddings por `fake_embedding()`.
+En modo local fake, el mismo `IndexingService` reutiliza el pipeline comun de descarga,
+extraccion, limpieza, chunking y persistencia, pero sustituye la generacion de embeddings
+por `fake_embedding()`.
 
 ---
 
 ### 7. RAG local fake
 
-En modo real, `RagService` usa LlamaIndex, Azure OpenAI y Qdrant.
+En modo real, `RAGEngine` usa LlamaIndex, Azure OpenAI y Qdrant.
 
-En modo fake, el router usa `FakeRagService`, que:
+En modo fake, `RAGEngine`:
 
 - no instancia Azure OpenAI,
-- no usa LlamaIndex con Azure embeddings,
 - consulta Qdrant directamente con `query_points`,
-- genera `summary` y `reason` localmente.
+- genera `summary` y `justification` localmente.
 
 Esto prueba el contrato y la recuperacion desde Qdrant sin llamar a GPT.
 
@@ -340,7 +335,6 @@ curl -s -X POST http://localhost:8003/search \
   -H "Content-Type: application/json" \
   -d '{
     "job_description": "Busco un perfil con experiencia en Python, backend, APIs y cloud",
-    "filters": {},
     "top_k": 5
   }'
 ```
@@ -349,19 +343,18 @@ Respuesta esperada:
 
 ```json
 {
-  "data": [
+  "results": [
     {
       "candidate_id": "uuid",
       "file_name": "uuid/cv_de_prueba.pdf",
       "score": 0.1234,
-      "summary": "Resumen local fake: ...",
-      "reason": "Coincidencia local fake ...",
+      "summary": "[FAKE] ...",
+      "justification": "[FAKE] ...",
       "contact_info": {},
       "exp_years": 0,
       "location": null
     }
-  ],
-  "error": null
+  ]
 }
 ```
 
@@ -408,7 +401,7 @@ Para resolverlo en una fase posterior haria falta:
 
 ### El LLM no es real
 
-`summary` y `reason` se generan localmente. No validan GPT ni prompt engineering.
+`summary` y `justification` se generan localmente. No validan GPT ni prompt engineering.
 
 ### La extraccion PDF si es real
 
@@ -439,23 +432,30 @@ docker compose \
 ## Ejecutar test automatizado principal
 
 La suite automatizada mantenida en este backend valida el flujo local fake completo usando
-Docker Compose y el entorno virtual del proyecto:
+Docker Compose y el entorno Python activo. Activa primero tu entorno virtual local si aplica:
 
 ```bash
-cd /home/jldom/TFM/TalentRefine/TalentRefineAI-Backend
-/home/jldom/TFM/TalentRefine/TR_Env/bin/pytest tests/integration/test_local_fake_flow.py -m integration -v
+cd /ruta/a/TalentRefineAI-Backend
+python -m pytest tests/integration/local_fake -m integration -v
 ```
 
-Tambien se puede usar el wrapper del repositorio:
+Tambien se puede usar el Makefile del repositorio:
 
 ```bash
-PYTEST_BIN=/home/jldom/TFM/TalentRefine/TR_Env/bin/pytest ./run_tests.sh integration
+make test-fake-flow
 ```
 
-Resultado esperado:
+Si tu `pytest` esta en una ruta concreta, puedes sobrescribirlo sin modificar el
+`Makefile`:
 
-```text
-1 passed
+```bash
+make test-fake-flow PYTEST_BIN=/ruta/a/tu/venv/bin/pytest
+```
+
+Para ejecutar unitarios y E2E fake:
+
+```bash
+make test-fake-all
 ```
 
 Durante la ejecución, el test guarda automáticamente los logs y el estado de Docker Compose en una carpeta del repositorio:
@@ -479,6 +479,14 @@ El test captura primero `docker compose logs` y, si no hay salida, hace un fallb
 Estos logs son evidencia directa del flujo y se conservan incluso después de que el stack se detenga.
 La carpeta `tests/integration/logs/` esta ignorada por Git para evitar versionar artefactos de
 ejecucion.
+
+Los tests unitarios no levantan Docker, pero guardan una evidencia estable por ejecucion en:
+
+```text
+tests/unit/logs/unit_<timestamp>/
+```
+
+Esto incluye `summary.json`, `summary.txt`, `test_start.txt` y `test_end.txt`.
 
 ---
 
@@ -611,10 +619,10 @@ El modo local fake se considera correcto si:
 - El PDF se escribe en el volumen local fake.
 - `ingest_service` llama a `processing_service`.
 - `processing_service` extrae texto con PyMuPDF y metadata con `pypdf`.
-- Se crean chunks con RecursiveCharacterTextSplitter.
+- Se crean chunks con LlamaIndex SentenceSplitter.
 - Se generan embeddings fake.
 - Qdrant local recibe puntos en la coleccion `talentrefine-candidates`.
 - `POST /search` devuelve candidatos desde Qdrant.
-- La respuesta mantiene el contrato `ApiResponse`.
+- La respuesta de busqueda mantiene el contrato actual `SearchResponse` con `results`.
 
 Esto demuestra el flujo tecnico del backend sin depender de Azure.
