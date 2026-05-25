@@ -37,8 +37,12 @@ class Settings(BaseSettings):
     # ── Azure OpenAI ─────────────────────────────────────────────────────────
     azure_openai_endpoint: str = ""
     azure_openai_api_version: str = "2024-02-15-preview"
+    # Nombre del deployment en Azure (puede diferir del nombre del modelo base)
     azure_openai_embedding_deployment: str = "text-embedding-3-small"
     azure_openai_chat_deployment: str = "gpt-4o-mini"
+    # Nombre del modelo base (requerido por LlamaIndex para validar el tipo)
+    azure_openai_embedding_model: str = "text-embedding-3-small"
+    azure_openai_chat_model: str = "gpt-4o-mini"
 
     # Dimensiones del vector de embedding (debe coincidir con el deployment real)
     fake_embedding_dimensions: int = 1536

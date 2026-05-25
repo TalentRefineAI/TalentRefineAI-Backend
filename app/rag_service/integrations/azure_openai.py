@@ -13,7 +13,7 @@ def get_embed_model() -> AzureOpenAIEmbedding:
     # La misma clave sirve para embedding y chat en el mismo recurso Azure OpenAI
     api_key = get_secret("azure-openai-api-key")
     return AzureOpenAIEmbedding(
-        model=settings.azure_openai_embedding_deployment,
+        model=settings.azure_openai_embedding_model,
         deployment_name=settings.azure_openai_embedding_deployment,
         api_key=api_key,
         azure_endpoint=settings.azure_openai_endpoint,
@@ -27,7 +27,7 @@ def get_llm() -> AzureOpenAI:
     settings = get_settings()
     api_key = get_secret("azure-openai-api-key")
     return AzureOpenAI(
-        model=settings.azure_openai_chat_deployment,
+        model=settings.azure_openai_chat_model,
         deployment_name=settings.azure_openai_chat_deployment,
         api_key=api_key,
         azure_endpoint=settings.azure_openai_endpoint,

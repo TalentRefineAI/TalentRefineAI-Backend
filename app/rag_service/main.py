@@ -44,15 +44,10 @@ def create_app() -> FastAPI:
     # Registra el router de busqueda bajo el prefijo /search
 
     @app.get("/health", tags=["health"])
-    async def health() -> dict:
-        # Comprueba que el servicio esta vivo; no requiere conexion con Azure
+    async def health() -> dict[str, str]:
         return {"status": "ok", "service": "rag-service"}
 
     app.include_router(search.router, prefix="/search", tags=["search"])
-
-    @app.get("/health", tags=["health"])
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "service": "rag-service"}
 
     return app
 

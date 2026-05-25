@@ -626,3 +626,163 @@ Con eso, la primera prueba Azure dejara de depender de supuestos desactualizados
     - Revisar logs en Log Analytics/Application Insights.
     - Confirmar ausencia de eventos fake en Azure real.
     - Documentar decisiones finales de topologia, secretos, Blob container y contrato frontend.
+
+---
+
+## 12. Estado real alcanzado — RAG Service + Qdrant en Azure Container Apps
+
+**Fecha:** mayo 2026 | **Rama backend:** `feat/ia-rag-devops`
+
+### 12.1 Recursos Azure operativos
+
+| Recurso | Nombre | Estado |
+|---------|--------|--------|
+| ACR | `crtalentrefinedevspc.azurecr.io` | Operativo, `admin_enabled=false` |
+| Container Apps Env | `cae-talentrefine-dev-spc` | VNET-integrado, `ashyriver-189f8d0a` |
+| Container App Qdrant | `ca-qdrant-talentrefine-dev-spc` | Healthy, imagen ACR `qdrant/qdrant:v1.14.1` |
+| Container App RAG | `ca-rag-talentrefine-dev-spc` | Healthy, imagen ACR `rag-service:0.1.1` |
+| Key Vault | `kv-talentrefine-dev-spc` | RBAC, secretos `azure-openai-api-key` y `qdrant-api-key` creados |
+| Azure OpenAI | `oai-talentrefine-dev-spc` | Deployments `embedding-deployment` (text-embedding-3-small) y `gpt-deployment` (gpt-4o-mini) |
+| Storage Account | `sttrdevspc2ad6c62z` | Container `pdfs` disponible |
+| Managed Identity | `mi-talentrefine-dev-spc` | 4 roles: AcrPull, KV Secrets User, Storage Blob Contributor, Cognitive Services OpenAI User |
+| Coleccion Qdrant | `talentrefine-candidates` | Creada, 1536 dimensiones, distancia Cosine |
+
+### 12.2 Imagenes Docker publicadas en ACR
+
+| Imagen | Tag | Descripcion |
+|--------|-----|-------------|
+| `rag-service` | `0.1.0`, `0.1.1`, `latest` | FastAPI RAG service (Python 3.12-slim, non-root, 636MB) |
+| `qdrant/qdrant` | `v1.14.1` | Importada desde Docker Hub via `az acr import` |
+| `curl/curl` | `latest` | Importada para jobs de bootstrap |
+
+### 12.3 Fixes de codigo realizados
+
+1. **`app/rag_service/main.py`**: eliminada ruta `/health` duplicada que causaba conflicto en el router de FastAPI.
+
+2. **`app/rag_service/integrations/azure_openai.py`**: separados los parametros `model` (nombre real del modelo base) y `deployment_name` (nombre del deployment en Azure). LlamaIndex valida el `model` contra un enum (`OpenAIEmbeddingModelType`) y rechaza deployment names arbitrarios.
+
+3. **`app/shared/config.py`**: anadidas dos nuevas settings:
+   - `azure_openai_embedding_model: str = "text-embedding-3-small"`
+   - `azure_openai_chat_model: str = "gpt-4o-mini"`
+
+### 12.4 Variables de entorno del rag-service en Azure
+
+```
+AZURE_CLIENT_ID=ed3560c9-e383-4b28-9be2-90f8d66e7447
+KEY_VAULT_URL=https://kv-talentrefine-dev-spc.vault.azure.net/
+AZURE_OPENAI_ENDPOINT=https://oai-talentrefine-dev-spc.openai.azure.com/
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=embedding-deployment
+AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-deployment
+AZURE_OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+AZURE_OPENAI_CHAT_MODEL=gpt-4o-mini
+QDRANT_URL=http://ca-qdrant-talentrefine-dev-spc.internal.ashyriver-189f8d0a.spaincentral.azurecontainerapps.io:80
+QDRANT_COLLECTION=talentrefine-candidates
+BLOB_ACCOUNT_URL=https://sttrdevspc2ad6c62z.blob.core.windows.net
+BLOB_CONTAINER_NAME=pdfs
+USE_FAKE_INTEGRATIONS=false
+APP_ENV=development
+LOG_LEVEL=INFO
+```
+
+### 12.5 Configuracion de red Qdrant (leccion aprendida)
+
+El cliente `qdrant-client` usa **puerto 6333** por defecto cuando no se especifica puerto en la URL HTTP. Azure Container Apps internal ingress escucha en **puerto 80** (HTTP) y **443** (HTTPS), NO en el puerto nativo del contenedor.
+
+Por tanto la URL de Qdrant debe incluir el puerto explicitamente:
+
+```
+# INCORRECTO — qdrant-client conecta a :6333 que no esta expuesto por ACA ingress
+QDRANT_URL=http://ca-qdrant-...internal.../
+
+# CORRECTO — usar el puerto del ACA internal ingress
+QDRANT_URL=http://ca-qdrant-...internal...:80
+```
+
+Ademas, la conexion HTTPS interna de ACA usa un certificado de una CA interna no incluida en el bundle `certifi` de Python. Para evitar errores SSL, se usa HTTP con `allowInsecure=true` en el ingress de Qdrant, que es seguro al estar dentro de la misma VNET privada.
+
+### 12.6 Bootstrap de la coleccion Qdrant
+
+La coleccion `talentrefine-candidates` no es creada automaticamente por ningun servicio en modo Azure real (solo en fake mode). Debe bootstrapearse manualmente una vez:
+
+```bash
+# Desde dentro del rag-service container (o desde un job con qdrant-client instalado)
+python -c "
+import asyncio
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import Distance, VectorParams
+
+QDRANT_URL = 'http://<qdrant-fqdn>:80'
+
+async def bootstrap():
+    client = AsyncQdrantClient(url=QDRANT_URL, api_key=None, check_compatibility=False)
+    if not await client.collection_exists('talentrefine-candidates'):
+        await client.create_collection(
+            collection_name='talentrefine-candidates',
+            vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+        )
+        print('Collection created')
+    await client.close()
+
+asyncio.run(bootstrap())
+"
+```
+
+### 12.7 Verificacion alcanzada
+
+| Check | Resultado |
+|-------|-----------|
+| `ca-qdrant` Healthy + Running | ✅ |
+| `ca-rag-service` Healthy + Running | ✅ |
+| `GET /health` del rag-service | ✅ `{"status":"ok","service":"rag-service"}` |
+| Validacion de esquema `POST /search` | ✅ 422 correcto con campo `job_description` |
+| Conexion rag → Qdrant (version check) | ✅ Qdrant `v1.14.1` detectado |
+| Coleccion `talentrefine-candidates` creada | ✅ 1536 dims, Cosine |
+| Key Vault secretos leidos por MI | ✅ `azure-openai-api-key`, `qdrant-api-key` |
+
+### 12.8 Estado pendiente para siguientes sesiones
+
+- `ca-rag-service` fue creado via CLI, no gestionado por Terraform.
+  Debe incorporarse a `terraform/modules/compute/main.tf`.
+- `terraform/modules/compute/main.tf` tiene cambios sin commit:
+  - Qdrant CA usa imagen ACR + Managed Identity (no Docker Hub).
+- La API key de Azure OpenAI se almacena en Key Vault (`azure-openai-api-key`).
+  Alternativa futura: Managed Identity con `AzureAD` token provider en LlamaIndex.
+- La version de `qdrant-client` (1.18.0) es incompatible con el servidor Qdrant (1.14.1).
+  Se recomienda actualizar la imagen de Qdrant en ACR o bajar la version del cliente.
+- El flujo completo (`upload → processing → search`) no ha sido validado en Azure.
+  Solo se ha validado `rag-service` de forma aislada.
+
+### 12.9 Comandos de redeploy
+
+```bash
+# 1. Login ACR
+az acr login --name crtalentrefinedevspc
+
+# 2. Build y push rag-service
+cd TalentRefineAI-Backend
+docker build -f app/rag_service/Dockerfile \
+  -t crtalentrefinedevspc.azurecr.io/rag-service:X.Y.Z \
+  -t crtalentrefinedevspc.azurecr.io/rag-service:latest .
+docker push crtalentrefinedevspc.azurecr.io/rag-service:X.Y.Z
+docker push crtalentrefinedevspc.azurecr.io/rag-service:latest
+
+# 3. Importar Qdrant a ACR (si hay nueva version)
+az acr import --name crtalentrefinedevspc \
+  --source docker.io/qdrant/qdrant:vX.Y.Z \
+  --image qdrant/qdrant:vX.Y.Z
+
+# 4. Aplicar Terraform (desde TalentRefineAI-Infra/terraform)
+terraform apply -auto-approve
+
+# 5. Actualizar rag-service CA (si no esta en Terraform)
+az containerapp update \
+  --name ca-rag-talentrefine-dev-spc \
+  --resource-group rg-talentrefine-dev-spc \
+  --image crtalentrefinedevspc.azurecr.io/rag-service:X.Y.Z
+
+# 6. Bootstrap Qdrant (solo si la coleccion no existe)
+az containerapp exec \
+  --name ca-rag-talentrefine-dev-spc \
+  --resource-group rg-talentrefine-dev-spc \
+  --command "python -c \"<script de bootstrap>\""
+```
