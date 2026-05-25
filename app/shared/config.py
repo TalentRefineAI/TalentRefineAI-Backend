@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
+    # URL del processing-service; se configura como variable de entorno en cada
+    # Container App. En local apunta a 127.0.0.1:8002, en Azure a la URL del CA.
+    processing_service_url: str = "http://localhost:8002"
+
 
 @lru_cache
 def get_settings() -> Settings:
