@@ -26,13 +26,20 @@ class QdrantRepository:
         self._client = AsyncQdrantClient(
             url=settings.qdrant_url,
             api_key=api_key or None,
+            timeout=60,
+            check_compatibility=False,
         )
 
     async def _ensure_collection(self) -> None:
-        """Crea la coleccion si no existe. Solo activo en modo fake."""
-        if not self._use_fake:
-            return
-        if not await self._client.collection_exists(self._collection):
+        """Crea la coleccion si no existe."""
+        logger.info("qdrant_checking_collection", collection=self._collection)
+        try:
+            exists = await self._client.collection_exists(self._collection)
+        except Exception as e:
+            logger.error("qdrant_collection_check_failed", exc_type=type(e).__name__, exc=repr(e))
+            raise
+        logger.info("qdrant_collection_exists", exists=exists)
+        if not exists:
             await self._client.create_collection(
                 collection_name=self._collection,
                 vectors_config=VectorParams(size=self._vector_size, distance=Distance.COSINE),
@@ -75,5 +82,6 @@ class QdrantRepository:
             points.append(PointStruct(id=node.node_id, vector=embedding, payload=payload))
 
         if points:
+            logger.info("qdrant_upserting", n_points=len(points))
             await self._client.upsert(collection_name=self._collection, points=points)
             logger.info("qdrant_upsert", collection=self._collection, points=len(points))

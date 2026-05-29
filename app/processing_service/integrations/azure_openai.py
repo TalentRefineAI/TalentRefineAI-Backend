@@ -17,7 +17,7 @@ def get_embed_model() -> AzureOpenAIEmbedding:
 
     # El deployment debe coincidir con el nombre configurado en el recurso Azure OpenAI
     return AzureOpenAIEmbedding(
-        model=settings.azure_openai_embedding_deployment,
+        model=settings.azure_openai_embedding_model,
         deployment_name=settings.azure_openai_embedding_deployment,
         api_key=api_key,
         azure_endpoint=settings.azure_openai_endpoint,

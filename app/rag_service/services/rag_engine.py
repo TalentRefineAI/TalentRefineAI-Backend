@@ -75,6 +75,19 @@ class RAGEngine:
     # ------------------------------------------------------------------ #
 
     async def _search_azure(self, request: SearchRequest) -> SearchResponse:
+        # Return empty results if collection does not exist or has no vectors yet
+        try:
+            client = self._qdrant_repo._client
+            if not await client.collection_exists(self._qdrant_repo._collection):
+                logger.warning("qdrant_collection_missing", collection=self._qdrant_repo._collection)
+                return SearchResponse(results=[])
+            info = await client.get_collection(self._qdrant_repo._collection)
+            if (info.points_count or 0) == 0:
+                logger.info("qdrant_collection_empty", collection=self._qdrant_repo._collection)
+                return SearchResponse(results=[])
+        except Exception as exc:
+            logger.warning("qdrant_collection_check_failed", error=str(exc))
+
         try:
             vector_store = await self._qdrant_repo.get_vector_store()
         except Exception as exc:

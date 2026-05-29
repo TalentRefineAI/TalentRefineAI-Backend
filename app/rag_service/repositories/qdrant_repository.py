@@ -16,6 +16,7 @@ class QdrantRepository:
         self._client = AsyncQdrantClient(
             url=settings.qdrant_url,
             api_key=api_key or None,
+            timeout=60,
         )
         self._collection = settings.qdrant_collection
 

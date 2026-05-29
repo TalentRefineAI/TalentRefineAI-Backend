@@ -1,6 +1,7 @@
 """Acceso a Azure Blob Storage – ingest-service."""
 import structlog
 from azure.identity.aio import DefaultAzureCredential
+from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient
 
 from shared.config import get_settings
@@ -46,7 +47,7 @@ class BlobRepository:
             await blob_client.upload_blob(
                 data,
                 overwrite=True,
-                content_settings={"content_type": content_type},
+                content_settings=ContentSettings(content_type=content_type),
             )
             logger.info("blob_uploaded", blob=blob_name, container=self._container)
             return blob_client.url

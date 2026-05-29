@@ -75,7 +75,8 @@ class IndexingService:
                 nodes=nodes, doc_metadata=metadata.model_dump(),
             )
         except Exception as exc:
-            raise VectorStoreError(f"Error subiendo nodos a Qdrant: {exc}") from exc
+            logger.error("qdrant_upsert_error", exc_type=type(exc).__name__, exc_repr=repr(exc))
+            raise VectorStoreError(f"Error subiendo nodos a Qdrant: {type(exc).__name__}: {exc}") from exc
 
     @staticmethod
     def _extract(pdf_bytes: bytes, file_name: str) -> tuple[str, dict[str, Any]]:
