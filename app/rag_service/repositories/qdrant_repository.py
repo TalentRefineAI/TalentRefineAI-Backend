@@ -17,6 +17,7 @@ class QdrantRepository:
             url=settings.qdrant_url,
             api_key=api_key or None,
             timeout=60,
+            check_compatibility=False,
         )
         self._collection = settings.qdrant_collection
 

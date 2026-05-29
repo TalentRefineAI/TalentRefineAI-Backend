@@ -4,6 +4,7 @@ from typing import Any
 
 import structlog
 from llama_index.core.schema import BaseNode
+from llama_index.core.vector_stores.utils import node_to_metadata_dict
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
@@ -78,6 +79,10 @@ class QdrantRepository:
                 location=None,
                 chunk_text=content,
             ).model_dump()
+            # Add LlamaIndex-required fields so the RAG retriever can reconstruct TextNodes
+            node_meta = node_to_metadata_dict(node)
+            payload["_node_content"] = node_meta["_node_content"]
+            payload["_node_type"] = node_meta["_node_type"]
 
             points.append(PointStruct(id=node.node_id, vector=embedding, payload=payload))
 
