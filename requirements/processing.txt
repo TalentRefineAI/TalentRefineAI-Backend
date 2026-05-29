@@ -1,0 +1,17 @@
+aiohttp==3.13.5
+azure-identity==1.25.3
+azure-keyvault-secrets==4.11.0
+azure-storage-blob==12.28.0
+fastapi==0.136.1
+langchain-text-splitters==1.1.2
+llama-index==0.14.21
+llama-index-embeddings-azure-openai==0.5.2
+openai==2.36.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+PyMuPDF==1.27.2.3
+pypdf==6.11.0
+qdrant-client==1.18.0
+structlog==25.5.0
+uvicorn[standard]==0.46.0
+
