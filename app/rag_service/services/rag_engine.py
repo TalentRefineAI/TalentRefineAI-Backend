@@ -7,10 +7,8 @@ from typing import Any
 
 import structlog
 from llama_index.core import Settings as LlamaSettings, VectorStoreIndex
-from llama_index.core.prompts import PromptTemplate
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.response_synthesizers import get_response_synthesizer
 from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.schema import QueryBundle
 from llama_index.core.vector_stores import (
     FilterOperator,
     MetadataFilter,
@@ -25,28 +23,6 @@ from ..repositories.qdrant_repository import QdrantRepository
 from ..routers.schemas import CandidateResult, SearchRequest, SearchResponse
 
 logger = structlog.get_logger(__name__)
-
-_SYSTEM_PROMPT = (
-    "Eres un experto en seleccion de personal IT. "
-    "Evalua a los candidatos basandote UNICAMENTE en los fragmentos de CV recuperados. "
-    "Para cada candidato devuelve un objeto JSON con los campos: "
-    "candidate_id (str), summary (str resumen conciso), justification (str motivo de encaje). "
-    "Devuelve SOLO un array JSON valido, sin texto adicional."
-)
-
-_QA_PROMPT_TMPL = (
-    _SYSTEM_PROMPT
-    + """
-
-Fragmentos de CV recuperados:
----------------------
-{context_str}
----------------------
-
-Puesto a cubrir: {query_str}
-
-Respuesta JSON: """
-)
 
 
 class RAGEngine:
@@ -75,7 +51,7 @@ class RAGEngine:
     # ------------------------------------------------------------------ #
 
     async def _search_azure(self, request: SearchRequest) -> SearchResponse:
-        # Return empty results if collection does not exist or has no vectors yet
+        # Guard: coleccion no existente o vacia
         try:
             client = self._qdrant_repo._client
             if not await client.collection_exists(self._qdrant_repo._collection):
@@ -99,34 +75,127 @@ class RAGEngine:
         )
 
         metadata_filters = self._build_metadata_filters(request)
-
         retriever = VectorIndexRetriever(
             index=index,
             similarity_top_k=request.top_k * 3,
             filters=metadata_filters,
         )
 
-        qa_prompt = PromptTemplate(_QA_PROMPT_TMPL)
-        response_synthesizer = get_response_synthesizer(
-            llm=LlamaSettings.llm,
-            text_qa_template=qa_prompt,
+        try:
+            source_nodes = await retriever.aretrieve(QueryBundle(request.job_description))
+        except Exception as exc:
+            raise LLMError(f"Error en recuperacion vectorial: {exc}") from exc
+
+        if not source_nodes:
+            return SearchResponse(results=[])
+
+        # Agrupar nodos por candidate_id (UUID del payload de Qdrant)
+        candidate_nodes: dict[str, list] = {}
+        for node in source_nodes:
+            cid = node.metadata.get("candidate_id") or node.node_id
+            candidate_nodes.setdefault(cid, []).append(node)
+
+        # Mejor score coseno por candidato y file_name
+        candidate_scores: dict[str, float] = {}
+        candidate_file: dict[str, str] = {}
+        for cid, nodes in candidate_nodes.items():
+            scores = [n.score for n in nodes if n.score is not None]
+            candidate_scores[cid] = max(scores) if scores else 0.0
+            candidate_file[cid] = nodes[0].metadata.get("file_name", "")
+
+        # Top-K candidatos por score
+        top_cids = sorted(candidate_scores, key=candidate_scores.__getitem__, reverse=True)[: request.top_k]
+
+        # LLM extrae informacion estructurada de todos los candidatos en una sola llamada
+        try:
+            llm_data = await self._extract_all_candidates(
+                {cid: candidate_nodes[cid] for cid in top_cids},
+                request.job_description,
+            )
+        except Exception as exc:
+            logger.warning("llm_extraction_failed", error=str(exc))
+            llm_data = {}
+
+        results: list[CandidateResult] = []
+        for cid in top_cids:
+            info = llm_data.get(cid, {})
+            results.append(
+                CandidateResult(
+                    candidate_id=cid,
+                    file_name=candidate_file[cid],
+                    score=candidate_scores[cid],
+                    summary=info.get("summary", ""),
+                    justification=info.get("justification", ""),
+                    contact_info={
+                        "name": info.get("name", ""),
+                        "email": info.get("email", ""),
+                        "phone": info.get("phone", ""),
+                        "skills": info.get("skills", []),
+                    },
+                    exp_years=int(info.get("exp_years") or 0),
+                    location=info.get("location"),
+                )
+            )
+
+        return SearchResponse(results=results)
+
+    # ------------------------------------------------------------------ #
+    # Extraccion estructurada via LLM                                    #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    async def _extract_all_candidates(
+        candidate_nodes: dict[str, list],
+        job_description: str,
+    ) -> dict[str, dict[str, Any]]:
+        """
+        Llama al LLM una sola vez para extraer informacion estructurada de todos
+        los candidatos (nombre, email, telefono, skills, exp_years, ubicacion,
+        resumen y justificacion de encaje).
+        Devuelve dict keyed por candidate_id (UUID).
+        """
+        sections: list[str] = []
+        for cid, nodes in candidate_nodes.items():
+            chunks = "\n\n".join(n.get_content() for n in nodes)
+            sections.append(f"[CANDIDATE_ID: {cid}]\n{chunks}")
+
+        context = "\n\n---\n\n".join(sections)
+
+        prompt = (
+            "Eres un experto en seleccion de personal IT.\n"
+            "A continuacion se muestran fragmentos de CV de uno o varios candidatos, "
+            "cada uno identificado por su CANDIDATE_ID exacto.\n\n"
+            + context
+            + f"\n\nPUESTO A CUBRIR:\n{job_description}\n\n"
+            "Para cada candidato extrae y devuelve un array JSON. "
+            "Cada objeto del array debe contener EXACTAMENTE estos campos:\n"
+            '- "candidate_id": el CANDIDATE_ID exacto que aparece entre corchetes (string, NO lo modifiques)\n'
+            '- "name": nombre completo del candidato extraido del CV (string)\n'
+            '- "email": correo electronico (string o null si no aparece)\n'
+            '- "phone": numero de telefono (string o null si no aparece)\n'
+            '- "exp_years": anos de experiencia profesional estimados por las fechas del CV (entero)\n'
+            '- "location": ciudad o pais del candidato (string o null si no aparece)\n'
+            '- "skills": lista de habilidades tecnicas principales, maximo 10 (array de strings)\n'
+            '- "summary": resumen profesional del candidato en 2-3 frases (string)\n'
+            '- "justification": motivo de encaje con el puesto en 2-3 frases (string)\n\n'
+            "Devuelve SOLO el array JSON valido, sin markdown ni texto adicional."
         )
 
-        query_engine = RetrieverQueryEngine(
-            retriever=retriever,
-            response_synthesizer=response_synthesizer,
-        )
+        llm = LlamaSettings.llm
+        response = await llm.acomplete(prompt)
+        response_text = str(response)
+
+        logger.info("llm_extraction_response", length=len(response_text))
 
         try:
-            response = await query_engine.aquery(request.job_description)
+            match = re.search(r"\[.*\]", response_text, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON array found in LLM response")
+            items: list[dict] = json.loads(match.group())
+            return {item["candidate_id"]: item for item in items if "candidate_id" in item}
         except Exception as exc:
-            raise LLMError(f"Error en la consulta LLM: {exc}") from exc
-
-        results = self._parse_llm_response(
-            str(response.response),
-            list(response.source_nodes),
-        )
-        return SearchResponse(results=results[: request.top_k])
+            logger.warning("llm_extraction_parse_failed", error=str(exc), response=response_text[:300])
+            return {}
 
     # ------------------------------------------------------------------ #
     # Implementacion fake (sin Azure)                                     #
@@ -188,57 +257,6 @@ class RAGEngine:
         return MetadataFilters(filters=filters) if filters else None
 
     @staticmethod
-    def _parse_llm_response(
-        response_text: str,
-        source_nodes: list,
-    ) -> list[CandidateResult]:
-        """
-        Parsea la respuesta JSON del LLM y la enriquece con datos del payload de Qdrant.
-        Fallback: construye resultados directamente desde source_nodes si el JSON es invalido.
-        """
-        # Mapeo candidate_id -> (score, payload) desde source_nodes
-        node_map: dict[str, tuple[float, dict[str, Any]]] = {}
-        for node in source_nodes:
-            payload = node.metadata or {}
-            cid = payload.get("candidate_id", node.node_id)
-            score = float(node.score) if node.score is not None else 0.0
-            if cid not in node_map or score > node_map[cid][0]:
-                node_map[cid] = (score, payload)
-
-        # Intentar parsear array JSON del LLM
-        try:
-            # Extraer el primer array JSON encontrado en la respuesta
-            match = re.search(r"\[.*\]", response_text, re.DOTALL)
-            if not match:
-                raise ValueError("No se encontro array JSON en la respuesta")
-            llm_items: list[dict] = json.loads(match.group())
-        except Exception:
-            logger.warning("llm_response_parse_failed", response=response_text[:200])
-            # Fallback: construir desde source_nodes
-            llm_items = [
-                {"candidate_id": cid, "summary": "", "justification": ""}
-                for cid in node_map
-            ]
-
-        results: list[CandidateResult] = []
-        for item in llm_items:
-            cid = item.get("candidate_id", "")
-            score, payload = node_map.get(cid, (0.0, {}))
-            results.append(
-                CandidateResult(
-                    candidate_id=cid,
-                    file_name=payload.get("file_name", ""),
-                    score=score,
-                    summary=item.get("summary", ""),
-                    justification=item.get("justification", ""),
-                    contact_info=payload.get("contact_info", {}),
-                    exp_years=int(payload.get("exp_years", 0)),
-                    location=payload.get("location"),
-                )
-            )
-        return results
-
-    @staticmethod
     def _payload_matches_filters(payload: dict, request: SearchRequest) -> bool:
         """Filtra Python-side en modo fake (Qdrant local no aplica los filtros)."""
         if request.min_exp_years is not None:
@@ -252,13 +270,11 @@ class RAGEngine:
 
     @staticmethod
     def _fake_summary(chunk_text: str) -> str:
-        """Resumen simple sin LLM para modo fake."""
         words = chunk_text.split()
         preview = " ".join(words[:30])
         return f"[FAKE] {preview}..." if len(words) > 30 else f"[FAKE] {chunk_text}"
 
     @staticmethod
     def _fake_justification(job_description: str, chunk_text: str) -> str:
-        """Justificacion placeholder sin LLM para modo fake."""
         keywords = job_description.split()[:5]
         return f"[FAKE] Candidato evaluado para: {chr(39).join(keywords)}. Fragmento: {chunk_text[:80]}"
