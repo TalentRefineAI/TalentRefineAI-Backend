@@ -93,7 +93,7 @@ class IngestService:
                 response = await client.post(
                     f"{base_url}/processing/{doc_id}",
                     params={"blob_name": blob_name},
-                    timeout=10.0,
+                    timeout=30.0,
                 )
                 response.raise_for_status()
                 logger.info("processing_triggered", doc_id=str(doc_id), blob_name=blob_name)
