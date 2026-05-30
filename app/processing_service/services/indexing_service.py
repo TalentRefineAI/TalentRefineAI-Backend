@@ -68,7 +68,14 @@ class IndexingService:
                 embeddings = await LlamaSettings.embed_model.aget_text_embedding_batch(chunks)
             except Exception as exc:
                 raise ProcessingError(f"Error generando embeddings: {exc}") from exc
-        nodes: list[TextNode] = [TextNode(text=chunk, embedding=emb) for chunk, emb in zip(chunks, embeddings)]
+        # Include candidate_id and file_name in node metadata so LlamaIndex
+        # can reconstruct them during RAG retrieval (grouping chunks by candidate).
+        file_name = metadata.file_name.split("/")[-1] if "/" in metadata.file_name else metadata.file_name
+        node_metadata = {"candidate_id": metadata.candidate_id, "file_name": file_name}
+        nodes: list[TextNode] = [
+            TextNode(text=chunk, embedding=emb, metadata=node_metadata)
+            for chunk, emb in zip(chunks, embeddings)
+        ]
         try:
             await self._qdrant.upsert_nodes(
                 doc_id=uuid.UUID(metadata.candidate_id),
