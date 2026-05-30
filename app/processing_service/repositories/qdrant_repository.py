@@ -6,7 +6,7 @@ import structlog
 from llama_index.core.schema import BaseNode
 from llama_index.core.vector_stores.utils import node_to_metadata_dict
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
 
 from shared.config import get_secret, get_settings
 from shared.fakes import fake_embedding
@@ -87,6 +87,13 @@ class QdrantRepository:
             points.append(PointStruct(id=node.node_id, vector=embedding, payload=payload))
 
         if points:
+            # Elimina puntos anteriores del mismo candidato para evitar duplicados
+            await self._client.delete(
+                collection_name=self._collection,
+                points_selector=Filter(
+                    must=[FieldCondition(key="candidate_id", match=MatchValue(value=str(doc_id)))]
+                ),
+            )
             logger.info("qdrant_upserting", n_points=len(points))
             await self._client.upsert(collection_name=self._collection, points=points)
             logger.info("qdrant_upsert", collection=self._collection, points=len(points))
