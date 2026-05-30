@@ -1,7 +1,9 @@
 """Router de upload – ingest-service. [BK-02]"""
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, status
+import io
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from shared.exceptions import StorageError
 from shared.models import ApiResponse, DocumentStatus
 
@@ -39,3 +41,17 @@ async def get_upload_status(doc_id: UUID) -> ApiResponse:
     except KeyError:
         # El identificador no existe en el registro de documentos
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
+
+@router.get("/{doc_id}/download")
+async def download_pdf(doc_id: UUID, filename: str = Query(..., description="Nombre del fichero PDF")) -> StreamingResponse:
+    """Descarga el PDF original de un candidato desde Blob Storage."""
+    try:
+        data = await _svc.download_document(doc_id, filename)
+        safe_name = filename.replace(""", "").replace("\", "")
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"inline; filename="{safe_name}""},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado") from exc

@@ -62,6 +62,12 @@ class IngestService:
             raise KeyError(doc_id)
         return self._status_store[doc_id]
 
+    async def download_document(self, doc_id: uuid.UUID, filename: str) -> bytes:
+        """Descarga el PDF de un documento desde Blob Storage."""
+        blob_name = f"{doc_id}/{filename}"
+        return await self._blob.download(blob_name)
+
+
     async def _process_upload(self, doc_id: uuid.UUID, content: bytes, filename: str) -> None:
         """Tarea de background: sube el PDF a Blob Storage y dispara el processing-service."""
         record = self._status_store[doc_id]
