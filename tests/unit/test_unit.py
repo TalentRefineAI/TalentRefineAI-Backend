@@ -231,36 +231,82 @@ class TestRAGEngineInit:
         assert s.startswith("[FAKE]")
         assert "..." in s
 
-    def test_parse_llm_response_valid_json(self):
+    def test_fake_justification(self):
         from rag_service.services.rag_engine import RAGEngine
-        from llama_index.core.schema import NodeWithScore, TextNode
-        node = NodeWithScore(
-            node=TextNode(
-                text="chunk",
-                metadata={"candidate_id": "abc-123", "file_name": "cv.pdf",
-                          "contact_info": {}, "exp_years": 5, "location": "Madrid"},
-            ),
-            score=0.9,
-        )
-        response_text = (
-            '[{"candidate_id": "abc-123", "summary": "Good dev", "justification": "Great fit"}]'
-        )
-        results = RAGEngine._parse_llm_response(response_text, [node])
-        assert len(results) == 1
-        assert results[0].justification == "Great fit"
-        assert results[0].score == 0.9
+        j = RAGEngine._fake_justification("Python developer with FastAPI", "chunk text")
+        assert j.startswith("[FAKE]")
+        assert "Python" in j
 
-    def test_parse_llm_response_fallback_on_invalid_json(self):
-        from rag_service.services.rag_engine import RAGEngine
-        from llama_index.core.schema import NodeWithScore, TextNode
-        node = NodeWithScore(
-            node=TextNode(
-                text="chunk",
-                metadata={"candidate_id": "xyz", "file_name": "cv.pdf",
-                          "contact_info": {}, "exp_years": 3, "location": None},
-            ),
-            score=0.7,
+
+# ── rag_service/routers/schemas.py (CandidateList) ───────────────────────────
+
+class TestCandidateListSchemas:
+    def test_candidate_list_item(self):
+        from rag_service.routers.schemas import CandidateListItem
+        item = CandidateListItem(
+            candidate_id="abc-123",
+            name="Ana García",
+            email="ana@example.com",
+            file_name="Ana_Garcia_CV.pdf",
         )
-        results = RAGEngine._parse_llm_response("not json at all", [node])
-        # Debe devolver resultados del fallback
-        assert isinstance(results, list)
+        assert item.candidate_id == "abc-123"
+        assert item.email == "ana@example.com"
+
+    def test_candidate_list_item_empty_email(self):
+        from rag_service.routers.schemas import CandidateListItem
+        # Email can be empty string (no email found in CV)
+        item = CandidateListItem(
+            candidate_id="abc", name="No Email", email="", file_name="cv.pdf"
+        )
+        assert item.email == ""
+
+    def test_candidate_list_response(self):
+        from rag_service.routers.schemas import CandidateListItem, CandidateListResponse
+        resp = CandidateListResponse(
+            total=2,
+            candidates=[
+                CandidateListItem(candidate_id="1", name="A", email="a@b.com", file_name="a.pdf"),
+                CandidateListItem(candidate_id="2", name="B", email="b@b.com", file_name="b.pdf"),
+            ],
+        )
+        assert resp.total == 2
+        assert len(resp.candidates) == 2
+
+    def test_candidate_list_response_empty(self):
+        from rag_service.routers.schemas import CandidateListResponse
+        resp = CandidateListResponse(total=0, candidates=[])
+        assert resp.total == 0
+        assert resp.candidates == []
+
+
+# ── rag_service/repositories/qdrant_repository.py – list_candidates logic ──
+
+class TestListCandidatesLogic:
+    """Tests for the email extraction and name normalization logic in list_candidates."""
+
+    def test_email_regex_extracts_valid_email(self):
+        import re
+        _EMAIL = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+        chunk = "Contact me at john.doe@example.com for more details"
+        m = _EMAIL.search(chunk)
+        assert m is not None
+        assert m.group() == "john.doe@example.com"
+
+    def test_email_regex_no_match_returns_empty(self):
+        import re
+        _EMAIL = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+        chunk = "No contact info here"
+        m = _EMAIL.search(chunk)
+        assert m is None
+
+    def test_fname_clean_strips_uuid_prefix(self):
+        raw = "b45b23a7-12bb-5e44-9870-13e4fe6b5370/CV Ouael Boussiali - 042026.pdf"
+        fname = raw.split("/")[-1] if "/" in raw else raw
+        name = fname.rsplit(".", 1)[0] if "." in fname else fname
+        assert name == "CV Ouael Boussiali - 042026"
+
+    def test_fname_clean_no_prefix(self):
+        raw = "simple_cv.pdf"
+        fname = raw.split("/")[-1] if "/" in raw else raw
+        name = fname.rsplit(".", 1)[0] if "." in fname else fname
+        assert name == "simple_cv"

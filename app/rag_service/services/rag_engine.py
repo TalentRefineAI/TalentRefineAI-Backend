@@ -278,3 +278,7 @@ class RAGEngine:
     def _fake_justification(job_description: str, chunk_text: str) -> str:
         keywords = job_description.split()[:5]
         return f"[FAKE] Candidato evaluado para: {chr(39).join(keywords)}. Fragmento: {chunk_text[:80]}"
+
+    async def list_candidates(self) -> list[dict]:
+        """Devuelve todos los candidatos únicos almacenados en Qdrant."""
+        return await self._qdrant_repo.list_candidates()

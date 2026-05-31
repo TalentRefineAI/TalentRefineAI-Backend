@@ -323,3 +323,18 @@ def search_candidates(
         "print(json.dumps({'status_code': response.status_code, 'text': response.text}))\n"
     )
     return json.loads(run_python_in_service("ingest-service", search_code, timeout=timeout))
+
+
+def list_candidates(
+    service_urls: dict[str, str],
+    timeout: int = 60,
+) -> dict[str, Any]:
+    """Llama a GET /search/candidates en el rag-service y devuelve {status_code, text}."""
+    list_url = f"{service_urls['rag']}/search/candidates"
+    code = (
+        "import json, httpx\n"
+        "with httpx.Client(timeout=30.0) as client:\n"
+        f"    response = client.get({list_url!r})\n"
+        "print(json.dumps({'status_code': response.status_code, 'text': response.text}))\n"
+    )
+    return json.loads(run_python_in_service("ingest-service", code, timeout=timeout))

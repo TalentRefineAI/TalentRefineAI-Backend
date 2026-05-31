@@ -30,3 +30,19 @@ class SearchResponse(BaseModel):
     """Respuesta del endpoint POST /search."""
 
     results: list[CandidateResult]
+
+
+class CandidateListItem(BaseModel):
+    """Candidato resumido para el listado de disponibles."""
+
+    candidate_id: str
+    name: str
+    email: str
+    file_name: str
+
+
+class CandidateListResponse(BaseModel):
+    """Respuesta del endpoint GET /search/candidates."""
+
+    total: int
+    candidates: list[CandidateListItem]

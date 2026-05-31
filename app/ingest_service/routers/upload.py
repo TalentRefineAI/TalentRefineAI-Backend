@@ -42,16 +42,22 @@ async def get_upload_status(doc_id: UUID) -> ApiResponse:
         # El identificador no existe en el registro de documentos
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
 
+
 @router.get("/{doc_id}/download")
-async def download_pdf(doc_id: UUID, filename: str = Query(..., description="Nombre del fichero PDF")) -> StreamingResponse:
+async def download_pdf(
+    doc_id: UUID,
+    filename: str = Query(..., description="Nombre del fichero PDF"),
+) -> StreamingResponse:
     """Descarga el PDF original de un candidato desde Blob Storage."""
     try:
         data = await _svc.download_document(doc_id, filename)
-        safe_name = filename.replace(""", "").replace("\", "")
+        safe_name = filename.replace('"', "").replace("\\", "")
         return StreamingResponse(
             io.BytesIO(data),
             media_type="application/pdf",
-            headers={"Content-Disposition": f"inline; filename="{safe_name}""},
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
         )
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado") from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado"
+        ) from exc

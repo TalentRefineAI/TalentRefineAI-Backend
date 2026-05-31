@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status
 
 from ..services.rag_engine import RAGEngine
-from .schemas import SearchRequest, SearchResponse
+from .schemas import CandidateListItem, CandidateListResponse, SearchRequest, SearchResponse
 
 router = APIRouter()
 # Instancia del motor RAG que orquesta el pipeline de busqueda
@@ -19,6 +19,24 @@ async def search_candidates(body: SearchRequest) -> SearchResponse:
         return await _engine.search_candidates(body)
     except Exception as exc:
         # Cualquier error inesperado se devuelve como 500 con detalle
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+@router.get("/candidates", response_model=CandidateListResponse)
+async def list_candidates() -> CandidateListResponse:
+    """
+    Devuelve todos los candidatos indexados en Qdrant (sin llamadas a LLM).
+    Usado por el frontend para mostrar el listado de candidatos disponibles.
+    """
+    try:
+        items = await _engine.list_candidates()
+        return CandidateListResponse(
+            total=len(items),
+            candidates=[CandidateListItem(**i) for i in items],
+        )
+    except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
