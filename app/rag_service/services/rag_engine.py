@@ -282,3 +282,7 @@ class RAGEngine:
     async def list_candidates(self) -> list[dict]:
         """Devuelve todos los candidatos únicos almacenados en Qdrant."""
         return await self._qdrant_repo.list_candidates()
+
+    async def delete_all_candidates(self) -> None:
+        """Elimina todos los candidatos del vector store."""
+        await self._qdrant_repo.delete_all()

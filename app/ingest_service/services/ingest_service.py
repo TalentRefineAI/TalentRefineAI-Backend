@@ -107,3 +107,9 @@ class IngestService:
             except httpx.HTTPError as exc:
                 logger.error("processing_trigger_failed", doc_id=str(doc_id), error=str(exc))
                 raise
+
+    async def delete_all_documents(self) -> None:
+        """Elimina todos los documentos del Blob Storage y limpia el estado en memoria."""
+        await self._blob.delete_all()
+        self._status_store.clear()
+        logger.info("all_documents_deleted")

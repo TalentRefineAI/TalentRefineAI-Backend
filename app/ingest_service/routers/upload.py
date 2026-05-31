@@ -61,3 +61,19 @@ async def download_pdf(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado"
         ) from exc
+
+
+@router.delete("/all")
+async def delete_all_uploads() -> dict:
+    """
+    Elimina todos los documentos de Blob Storage y limpia el estado en memoria.
+    Usado por el frontend para el botón "Eliminar todo".
+    """
+    try:
+        await _svc.delete_all_documents()
+        return {"deleted": True}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc

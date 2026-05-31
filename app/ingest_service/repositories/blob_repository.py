@@ -63,3 +63,25 @@ class BlobRepository:
             blob_client = container.get_blob_client(blob_name)
             stream = await blob_client.download_blob()
             return await stream.readall()
+
+    async def delete_all(self) -> None:
+        """Elimina todos los blobs del container (o directorio local en fake mode)."""
+        if self._use_fake:
+            import shutil
+            from shared.config import get_settings as _gs
+            root = _gs().local_blob_path
+            shutil.rmtree(root, ignore_errors=True)
+            import os
+            os.makedirs(root, exist_ok=True)
+            logger.info("fake_blob_container_cleared", path=root)
+            return
+
+        async with self._get_client().get_container_client(self._container) as container:
+            blob_names = [b.name async for b in container.list_blobs()]
+            if blob_names:
+                # Batch delete en lotes de 256 (límite Azure SDK)
+                batch_size = 256
+                for i in range(0, len(blob_names), batch_size):
+                    batch = blob_names[i : i + batch_size]
+                    await container.delete_blobs(*batch, raise_on_any_error=False)
+            logger.info("blob_container_cleared", container=self._container, deleted=len(blob_names))

@@ -95,3 +95,8 @@ class QdrantRepository:
             offset = next_offset
 
         return candidates
+
+    async def delete_all(self) -> None:
+        """Elimina toda la colección de Qdrant (borra la collection entera)."""
+        if await self._client.collection_exists(self._collection):
+            await self._client.delete_collection(self._collection)

@@ -46,6 +46,14 @@ class QdrantRepository:
                 vectors_config=VectorParams(size=self._vector_size, distance=Distance.COSINE),
             )
             logger.info("qdrant_collection_created", collection=self._collection)
+            # Índice en candidate_id para acelerar scroll+dedup en list_candidates
+            from qdrant_client.models import PayloadSchemaType
+            await self._client.create_payload_index(
+                collection_name=self._collection,
+                field_name="candidate_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            logger.info("qdrant_payload_index_created", field="candidate_id")
 
     async def upsert_nodes(
         self,

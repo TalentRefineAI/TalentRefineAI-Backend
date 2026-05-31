@@ -41,3 +41,19 @@ async def list_candidates() -> CandidateListResponse:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc
+
+
+@router.delete("/candidates")
+async def delete_all_candidates() -> dict:
+    """
+    Elimina toda la colección de candidatos de Qdrant.
+    Usado por el frontend para el botón "Eliminar todo".
+    """
+    try:
+        await _engine.delete_all_candidates()
+        return {"deleted": True}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
