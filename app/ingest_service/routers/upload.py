@@ -49,14 +49,23 @@ async def download_pdf(
     filename: str = Query(..., description="Nombre del fichero PDF"),
 ) -> StreamingResponse:
     """Descarga el PDF original de un candidato desde Blob Storage."""
+    # Sanitize: reject filenames with path-traversal sequences or separators
+    import os
+    clean_filename = os.path.basename(filename.replace("\\", "/"))
+    if not clean_filename or ".." in clean_filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Nombre de fichero no valido"
+        )
     try:
-        data = await _svc.download_document(doc_id, filename)
-        safe_name = filename.replace('"', "").replace("\\", "")
+        data = await _svc.download_document(doc_id, clean_filename)
+        safe_name = clean_filename.replace('"', "")
         return StreamingResponse(
             io.BytesIO(data),
             media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado"

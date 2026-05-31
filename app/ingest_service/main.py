@@ -40,15 +40,10 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/health", tags=["health"])
-    async def health() -> dict:
-        # Comprueba que el servicio esta vivo; no requiere conexion con Azure
+    async def health() -> dict[str, str]:
         return {"status": "ok", "service": "ingest-service"}
 
     app.include_router(upload.router, prefix="/upload", tags=["upload"])
-
-    @app.get("/health", tags=["health"])
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "service": "ingest-service"}
 
     return app
 
