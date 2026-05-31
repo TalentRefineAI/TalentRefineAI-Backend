@@ -116,6 +116,24 @@ class RAGEngine:
             logger.warning("llm_extraction_failed", error=str(exc))
             llm_data = {}
 
+        # Score híbrido: normaliza coseno (min-max) dentro del result set
+        # y lo combina con relevance_score del LLM (40% coseno + 60% LLM).
+        # Fallback a coseno puro si el LLM no devolvio datos.
+        _cosine_vals = [candidate_scores[cid] for cid in top_cids]
+        _min_c = min(_cosine_vals) if _cosine_vals else 0.0
+        _max_c = max(_cosine_vals) if _cosine_vals else 1.0
+        _spread = (_max_c - _min_c) if _max_c > _min_c else 1.0
+        final_scores: dict[str, float] = {}
+        for cid in top_cids:
+            norm_cosine = (candidate_scores[cid] - _min_c) / _spread
+            if llm_data:
+                llm_rel = float(llm_data.get(cid, {}).get("relevance_score") or 0) / 100.0
+                final_scores[cid] = round(0.4 * norm_cosine + 0.6 * llm_rel, 4)
+            else:
+                final_scores[cid] = round(candidate_scores[cid], 4)
+        # Re-ordenar por score final (LLM-aware ranking)
+        top_cids = sorted(top_cids, key=final_scores.__getitem__, reverse=True)
+
         results: list[CandidateResult] = []
         for cid in top_cids:
             info = llm_data.get(cid, {})
@@ -123,7 +141,7 @@ class RAGEngine:
                 CandidateResult(
                     candidate_id=cid,
                     file_name=candidate_file[cid],
-                    score=candidate_scores[cid],
+                    score=final_scores[cid],
                     summary=info.get("summary", ""),
                     justification=info.get("justification", ""),
                     contact_info={
@@ -177,7 +195,11 @@ class RAGEngine:
             '- "location": ciudad o pais del candidato (string o null si no aparece)\n'
             '- "skills": lista de habilidades tecnicas principales, maximo 10 (array de strings)\n'
             '- "summary": resumen profesional del candidato en 2-3 frases (string)\n'
-            '- "justification": motivo de encaje con el puesto en 2-3 frases (string)\n\n'
+            '- "justification": motivo de encaje con el puesto en 2-3 frases (string)\n'
+            '- "relevance_score": puntuacion entera de 0 a 100 que indica el encaje del candidato '
+            'con el puesto. Rubrica: 90-100 excelente (cubre todos los requisitos clave); '
+            '70-89 buen encaje (mayoria de requisitos); 50-69 encaje parcial; '
+            '30-49 encaje debil; 0-29 sin encaje relevante.\n\n'
             "Devuelve SOLO el array JSON valido, sin markdown ni texto adicional."
         )
 
