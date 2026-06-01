@@ -81,15 +81,16 @@ class RAGEngine:
             has_filter=qdrant_filter is not None,
         )
 
-        # Busqueda vectorial directa usando client.search() (API estable, retorna list[ScoredPoint])
+        # Busqueda vectorial directa con query_points (qdrant_client >= 1.9)
         try:
-            raw_points = await client.search(
+            qr = await client.query_points(
                 collection_name=collection,
-                query_vector=list(query_embedding),
+                query=list(query_embedding),
                 limit=request.top_k * 3,
                 with_payload=True,
                 query_filter=qdrant_filter,
             )
+            raw_points = qr.points
         except Exception as exc:
             logger.error("qdrant_search_failed", error=str(exc), error_type=type(exc).__name__)
             raise VectorStoreError(f"Error en busqueda vectorial: {exc}") from exc
@@ -266,7 +267,7 @@ class RAGEngine:
     def _build_qdrant_filter(request: SearchRequest) -> Filter | None:
         """Construye filtros nativos de Qdrant para busqueda directa."""
         conditions = []
-        if request.min_exp_years is not None:
+        if request.min_exp_years is not None and request.min_exp_years > 0:
             conditions.append(FieldCondition(key="exp_years", range=Range(gte=request.min_exp_years)))
         if request.required_location:
             conditions.append(FieldCondition(key="location", match=MatchValue(value=request.required_location)))
