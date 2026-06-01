@@ -1,6 +1,5 @@
 """Repositorio Qdrant – rag-service (lectura/búsqueda)."""
 import time as _time
-from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient
 
 # Module-level TTL cache for list_candidates (avoids repeated full-scroll calls)
@@ -26,14 +25,6 @@ class QdrantRepository:
             check_compatibility=False,
         )
         self._collection = settings.qdrant_collection
-
-    async def get_vector_store(self) -> QdrantVectorStore:
-        """Devuelve el adaptador de LlamaIndex que envuelve la coleccion de Qdrant."""
-        # aclient usa el cliente asincrono para mantener la consistencia del servicio
-        return QdrantVectorStore(
-            aclient=self._client,
-            collection_name=self._collection,
-        )
 
     async def search_fake(self, query_text: str, limit: int) -> list:
         """Busqueda fake usando fake_embedding. Para uso en local sin Azure."""

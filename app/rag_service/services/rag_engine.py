@@ -1,4 +1,4 @@
-"""Motor RAG con filtrado nativo de Qdrant via MetadataFilters de LlamaIndex."""
+"""Motor RAG con busqueda directa via Qdrant + extraccion estructurada via LLM."""
 from __future__ import annotations
 
 import json
@@ -6,14 +6,8 @@ import re
 from typing import Any
 
 import structlog
-from llama_index.core import Settings as LlamaSettings, VectorStoreIndex
-from llama_index.core.retrievers import VectorIndexRetriever
-from llama_index.core.schema import QueryBundle
-from llama_index.core.vector_stores import (
-    FilterOperator,
-    MetadataFilter,
-    MetadataFilters,
-)
+from llama_index.core import Settings as LlamaSettings
+from qdrant_client.models import FieldCondition, Filter, MatchValue, Range
 
 from shared.config import get_settings
 from shared.exceptions import LLMError, VectorStoreError
@@ -47,78 +41,80 @@ class RAGEngine:
         return await self._search_azure(request)
 
     # ------------------------------------------------------------------ #
-    # Implementacion Azure (LlamaIndex + Qdrant + OpenAI)                #
+    # Implementacion Azure (Qdrant directo + OpenAI)                     #
     # ------------------------------------------------------------------ #
 
     async def _search_azure(self, request: SearchRequest) -> SearchResponse:
+        client = self._qdrant_repo._client
+        collection = self._qdrant_repo._collection
+
         # Guard: coleccion no existente o vacia
         try:
-            client = self._qdrant_repo._client
-            if not await client.collection_exists(self._qdrant_repo._collection):
-                logger.warning("qdrant_collection_missing", collection=self._qdrant_repo._collection)
+            if not await client.collection_exists(collection):
+                logger.warning("qdrant_collection_missing", collection=collection)
                 return SearchResponse(results=[])
-            info = await client.get_collection(self._qdrant_repo._collection)
+            info = await client.get_collection(collection)
             if (info.points_count or 0) == 0:
-                logger.info("qdrant_collection_empty", collection=self._qdrant_repo._collection)
+                logger.info("qdrant_collection_empty", collection=collection)
                 return SearchResponse(results=[])
         except Exception as exc:
             logger.warning("qdrant_collection_check_failed", error=str(exc))
 
+        # Generar embedding de la consulta directamente via Azure OpenAI
         try:
-            vector_store = await self._qdrant_repo.get_vector_store()
+            query_embedding = await LlamaSettings.embed_model.aget_text_embedding(request.job_description)
         except Exception as exc:
-            raise VectorStoreError(f"Error obteniendo VectorStore: {exc}") from exc
+            raise LLMError(f"Error generando embedding: {exc}") from exc
 
-        index = VectorStoreIndex.from_vector_store(
-            vector_store,
-            embed_model=LlamaSettings.embed_model,
-        )
+        # Filtros nativos de Qdrant
+        qdrant_filter = self._build_qdrant_filter(request)
 
-        metadata_filters = self._build_metadata_filters(request)
-        retriever = VectorIndexRetriever(
-            index=index,
-            similarity_top_k=request.top_k * 3,
-            filters=metadata_filters,
-        )
-
+        # Busqueda vectorial directa (sin LlamaIndex VectorIndexRetriever)
         try:
-            source_nodes = await retriever.aretrieve(QueryBundle(request.job_description))
+            response = await client.query_points(
+                collection_name=collection,
+                query=query_embedding,
+                limit=request.top_k * 3,
+                with_payload=True,
+                query_filter=qdrant_filter,
+            )
+            raw_points = response.points
         except Exception as exc:
-            raise LLMError(f"Error en recuperacion vectorial: {exc}") from exc
+            raise VectorStoreError(f"Error en busqueda vectorial: {exc}") from exc
 
-        if not source_nodes:
+        logger.info("qdrant_search_result", n_points=len(raw_points))
+
+        if not raw_points:
             return SearchResponse(results=[])
 
-        # Agrupar nodos por candidate_id (UUID del payload de Qdrant)
-        candidate_nodes: dict[str, list] = {}
-        for node in source_nodes:
-            cid = node.metadata.get("candidate_id") or node.node_id
-            candidate_nodes.setdefault(cid, []).append(node)
-
-        # Mejor score coseno por candidato y file_name
+        # Agrupar por candidate_id: mejor score coseno y acumular chunks
         candidate_scores: dict[str, float] = {}
         candidate_file: dict[str, str] = {}
-        for cid, nodes in candidate_nodes.items():
-            scores = [n.score for n in nodes if n.score is not None]
-            candidate_scores[cid] = max(scores) if scores else 0.0
-            candidate_file[cid] = nodes[0].metadata.get("file_name", "")
+        candidate_chunks: dict[str, list[str]] = {}
 
-        # Top-K candidatos por score
+        for point in raw_points:
+            payload = point.payload or {}
+            cid = payload.get("candidate_id") or str(point.id)
+            score = float(point.score) if point.score is not None else 0.0
+            if cid not in candidate_scores or score > candidate_scores[cid]:
+                candidate_scores[cid] = score
+                candidate_file[cid] = payload.get("file_name", "")
+            candidate_chunks.setdefault(cid, []).append(payload.get("chunk_text", ""))
+
+        # Top-K candidatos por score coseno
         top_cids = sorted(candidate_scores, key=candidate_scores.__getitem__, reverse=True)[: request.top_k]
 
         # LLM extrae informacion estructurada de todos los candidatos en una sola llamada
         try:
             llm_data = await self._extract_all_candidates(
-                {cid: candidate_nodes[cid] for cid in top_cids},
+                {cid: candidate_chunks[cid] for cid in top_cids},
                 request.job_description,
             )
         except Exception as exc:
             logger.warning("llm_extraction_failed", error=str(exc))
             llm_data = {}
 
-        # Score híbrido: normaliza coseno (min-max) dentro del result set
-        # y lo combina con relevance_score del LLM (40% coseno + 60% LLM).
-        # Fallback a coseno puro si el LLM no devolvio datos.
+        # Score hibrido: 40% coseno normalizado + 60% relevance_score del LLM
         _cosine_vals = [candidate_scores[cid] for cid in top_cids]
         _min_c = min(_cosine_vals) if _cosine_vals else 0.0
         _max_c = max(_cosine_vals) if _cosine_vals else 1.0
@@ -131,7 +127,6 @@ class RAGEngine:
                 final_scores[cid] = round(0.4 * norm_cosine + 0.6 * llm_rel, 4)
             else:
                 final_scores[cid] = round(candidate_scores[cid], 4)
-        # Re-ordenar por score final (LLM-aware ranking)
         top_cids = sorted(top_cids, key=final_scores.__getitem__, reverse=True)
 
         results: list[CandidateResult] = []
@@ -163,19 +158,18 @@ class RAGEngine:
 
     @staticmethod
     async def _extract_all_candidates(
-        candidate_nodes: dict[str, list],
+        candidate_chunks: dict[str, list[str]],
         job_description: str,
     ) -> dict[str, dict[str, Any]]:
         """
         Llama al LLM una sola vez para extraer informacion estructurada de todos
-        los candidatos (nombre, email, telefono, skills, exp_years, ubicacion,
-        resumen y justificacion de encaje).
-        Devuelve dict keyed por candidate_id (UUID).
+        los candidatos. candidate_chunks: {cid: [chunk_text, ...]}
+        Devuelve dict keyed por candidate_id.
         """
         sections: list[str] = []
-        for cid, nodes in candidate_nodes.items():
-            chunks = "\n\n".join(n.get_content() for n in nodes)
-            sections.append(f"[CANDIDATE_ID: {cid}]\n{chunks}")
+        for cid, chunks in candidate_chunks.items():
+            text = "\n\n".join(chunks)
+            sections.append(f"[CANDIDATE_ID: {cid}]\n{text}")
 
         context = "\n\n---\n\n".join(sections)
 
@@ -257,26 +251,14 @@ class RAGEngine:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _build_metadata_filters(request: SearchRequest) -> MetadataFilters | None:
-        """Construye filtros nativos de Qdrant via LlamaIndex MetadataFilters."""
-        filters: list[MetadataFilter] = []
+    def _build_qdrant_filter(request: SearchRequest) -> Filter | None:
+        """Construye filtros nativos de Qdrant para busqueda directa."""
+        conditions = []
         if request.min_exp_years is not None:
-            filters.append(
-                MetadataFilter(
-                    key="exp_years",
-                    operator=FilterOperator.GTE,
-                    value=request.min_exp_years,
-                )
-            )
+            conditions.append(FieldCondition(key="exp_years", range=Range(gte=request.min_exp_years)))
         if request.required_location:
-            filters.append(
-                MetadataFilter(
-                    key="location",
-                    operator=FilterOperator.EQ,
-                    value=request.required_location,
-                )
-            )
-        return MetadataFilters(filters=filters) if filters else None
+            conditions.append(FieldCondition(key="location", match=MatchValue(value=request.required_location)))
+        return Filter(must=conditions) if conditions else None
 
     @staticmethod
     def _payload_matches_filters(payload: dict, request: SearchRequest) -> bool:
@@ -302,7 +284,7 @@ class RAGEngine:
         return f"[FAKE] Candidato evaluado para: {chr(39).join(keywords)}. Fragmento: {chunk_text[:80]}"
 
     async def list_candidates(self) -> list[dict]:
-        """Devuelve todos los candidatos únicos almacenados en Qdrant."""
+        """Devuelve todos los candidatos unicos almacenados en Qdrant."""
         return await self._qdrant_repo.list_candidates()
 
     async def delete_all_candidates(self) -> None:
