@@ -1,6 +1,12 @@
 """Repositorio Qdrant – rag-service (lectura/búsqueda)."""
+import time as _time
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient
+
+# Module-level TTL cache for list_candidates (avoids repeated full-scroll calls)
+_cand_cache: list[dict] = []
+_cand_cache_ts: float = 0.0
+_CAND_TTL: float = 60.0
 
 from shared.config import get_secret, get_settings
 from shared.fakes import fake_embedding
@@ -47,7 +53,12 @@ class QdrantRepository:
         - Deduplica por candidate_id.
         - Nombre: filename limpio (sin prefijo UUID ni extensión).
         - Email: extraído por regex del chunk de texto; sin llamadas a LLM.
+        - Resultado cacheado en memoria 60 s para reducir llamadas a Qdrant.
         """
+        global _cand_cache, _cand_cache_ts
+        if _cand_cache and (_time.monotonic() - _cand_cache_ts) < _CAND_TTL:
+            return list(_cand_cache)
+
         import re
         _EMAIL = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
@@ -63,7 +74,7 @@ class QdrantRepository:
                 collection_name=self._collection,
                 with_payload=True,
                 with_vectors=False,
-                limit=100,
+                limit=500,
                 offset=offset,
             )
             for point in result:
@@ -94,9 +105,13 @@ class QdrantRepository:
                 break
             offset = next_offset
 
+        _cand_cache = list(candidates)
+        _cand_cache_ts = _time.monotonic()
         return candidates
 
     async def delete_all(self) -> None:
         """Elimina toda la colección de Qdrant (borra la collection entera)."""
+        global _cand_cache_ts
+        _cand_cache_ts = 0.0  # invalidar cache de candidatos
         if await self._client.collection_exists(self._collection):
             await self._client.delete_collection(self._collection)

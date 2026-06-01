@@ -30,6 +30,7 @@ class SearchResponse(BaseModel):
     """Respuesta del endpoint POST /search."""
 
     results: list[CandidateResult]
+    processing_time_ms: int = 0
 
 
 class CandidateListItem(BaseModel):
@@ -46,3 +47,4 @@ class CandidateListResponse(BaseModel):
 
     total: int
     candidates: list[CandidateListItem]
+    processing_time_ms: int = 0
