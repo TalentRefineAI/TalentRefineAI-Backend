@@ -1,6 +1,7 @@
 """Motor RAG con busqueda directa via Qdrant + extraccion estructurada via LLM."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -48,20 +49,47 @@ class RAGEngine:
         client = self._qdrant_repo._client
         collection = self._qdrant_repo._collection
 
-        # Guard: coleccion no existente o vacia
+        # Guard: coleccion no existente o vacia — con reintentos por si Qdrant
+        # acaba de arrancar y la coleccion aun se esta cargando desde disco.
         points_count = 0
-        try:
-            if not await client.collection_exists(collection):
-                logger.warning("qdrant_collection_missing", collection=collection)
-                return SearchResponse(results=[])
-            info = await client.get_collection(collection)
-            points_count = info.points_count or 0
-            logger.info("qdrant_collection_info", points_count=points_count, collection=collection)
-            if points_count == 0:
-                logger.info("qdrant_collection_empty", collection=collection)
-                return SearchResponse(results=[])
-        except Exception as exc:
-            logger.warning("qdrant_collection_check_failed", error=str(exc))
+        _max_attempts = 4
+        _collection_ready = False
+        for _attempt in range(_max_attempts):
+            try:
+                if await client.collection_exists(collection):
+                    info = await client.get_collection(collection)
+                    points_count = info.points_count or 0
+                    if points_count > 0:
+                        _collection_ready = True
+                        logger.info(
+                            "qdrant_collection_ready",
+                            points_count=points_count,
+                            attempt=_attempt + 1,
+                        )
+                        break
+                    logger.warning(
+                        "qdrant_collection_empty_or_loading",
+                        attempt=_attempt + 1,
+                        points_count=points_count,
+                    )
+                else:
+                    logger.warning("qdrant_collection_missing", attempt=_attempt + 1)
+            except Exception as exc:
+                logger.warning(
+                    "qdrant_collection_check_failed",
+                    error=str(exc),
+                    attempt=_attempt + 1,
+                )
+            if _attempt < _max_attempts - 1:
+                await asyncio.sleep(2)
+
+        if not _collection_ready:
+            logger.warning(
+                "qdrant_collection_not_ready",
+                max_attempts=_max_attempts,
+                points_count=points_count,
+            )
+            return SearchResponse(results=[])
 
         # Generar embedding de la consulta directamente via Azure OpenAI
         try:
