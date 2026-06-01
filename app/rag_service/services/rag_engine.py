@@ -49,12 +49,15 @@ class RAGEngine:
         collection = self._qdrant_repo._collection
 
         # Guard: coleccion no existente o vacia
+        points_count = 0
         try:
             if not await client.collection_exists(collection):
                 logger.warning("qdrant_collection_missing", collection=collection)
                 return SearchResponse(results=[])
             info = await client.get_collection(collection)
-            if (info.points_count or 0) == 0:
+            points_count = info.points_count or 0
+            logger.info("qdrant_collection_info", points_count=points_count, collection=collection)
+            if points_count == 0:
                 logger.info("qdrant_collection_empty", collection=collection)
                 return SearchResponse(results=[])
         except Exception as exc:
@@ -69,20 +72,29 @@ class RAGEngine:
         # Filtros nativos de Qdrant
         qdrant_filter = self._build_qdrant_filter(request)
 
-        # Busqueda vectorial directa (sin LlamaIndex VectorIndexRetriever)
+        logger.info(
+            "qdrant_search_attempt",
+            collection=collection,
+            points_in_collection=points_count,
+            embedding_dim=len(query_embedding),
+            limit=request.top_k * 3,
+            has_filter=qdrant_filter is not None,
+        )
+
+        # Busqueda vectorial directa usando client.search() (API estable, retorna list[ScoredPoint])
         try:
-            response = await client.query_points(
+            raw_points = await client.search(
                 collection_name=collection,
-                query=query_embedding,
+                query_vector=list(query_embedding),
                 limit=request.top_k * 3,
                 with_payload=True,
                 query_filter=qdrant_filter,
             )
-            raw_points = response.points
         except Exception as exc:
+            logger.error("qdrant_search_failed", error=str(exc), error_type=type(exc).__name__)
             raise VectorStoreError(f"Error en busqueda vectorial: {exc}") from exc
 
-        logger.info("qdrant_search_result", n_points=len(raw_points))
+        logger.info("qdrant_search_result", n_points=len(raw_points), points_in_collection=points_count)
 
         if not raw_points:
             return SearchResponse(results=[])
