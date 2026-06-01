@@ -104,6 +104,7 @@ class RAGEngine:
         candidate_scores: dict[str, float] = {}
         candidate_file: dict[str, str] = {}
         candidate_chunks: dict[str, list[str]] = {}
+        candidate_payloads: dict[str, dict] = {}
 
         for point in raw_points:
             payload = point.payload or {}
@@ -113,16 +114,23 @@ class RAGEngine:
                 candidate_scores[cid] = score
                 candidate_file[cid] = payload.get("file_name", "")
             candidate_chunks.setdefault(cid, []).append(payload.get("chunk_text", ""))
+            candidate_payloads[cid] = {k: v for k, v in payload.items() if k != "chunk_text"}
 
         # Top-K candidatos por score coseno
         top_cids = sorted(candidate_scores, key=candidate_scores.__getitem__, reverse=True)[: request.top_k]
 
         # LLM extrae informacion estructurada de todos los candidatos en una sola llamada
+        # Usar claves enteras simples para el LLM: evita que el LLM modifique IDs con
+        # caracteres especiales (espacios, barras) que rompen el matching posterior
+        _cid_list = list(top_cids)
+        _idx_to_cid = {str(i): cid for i, cid in enumerate(_cid_list)}
         try:
-            llm_data = await self._extract_all_candidates(
-                {cid: candidate_chunks[cid] for cid in top_cids},
-                request.job_description,
+            _llm_data_raw = await self._extract_all_candidates(
+                job_description=request.job_description,
+                candidate_chunks={str(i): candidate_chunks[cid] for i, cid in enumerate(_cid_list)},
             )
+            llm_data = {_idx_to_cid[k]: v for k, v in _llm_data_raw.items() if k in _idx_to_cid}
+            logger.info("llm_data_mapped", candidates_queried=len(_cid_list), candidates_with_llm_data=len(llm_data))
         except Exception as exc:
             logger.warning("llm_extraction_failed", error=str(exc))
             llm_data = {}
@@ -142,21 +150,33 @@ class RAGEngine:
                 final_scores[cid] = round(candidate_scores[cid], 4)
         top_cids = sorted(top_cids, key=final_scores.__getitem__, reverse=True)
 
-        # Filtro post-LLM por exp_years (usa datos extraidos del texto del CV, no el payload Qdrant)
-        if request.min_exp_years is not None and request.min_exp_years > 0 and llm_data:
-            top_cids = [
-                cid for cid in top_cids
-                if int((llm_data.get(cid) or {}).get("exp_years") or 0) >= int(request.min_exp_years)
-            ]
+        # Filtro post-LLM por exp_years — solo filtrar candidatos que tenemos data LLM
+        # Los que no tienen data LLM, usaremos payload de Qdrant como fallback
+        if request.min_exp_years is not None and request.min_exp_years > 0:
+            filtered_cids = []
+            for cid in top_cids:
+                # Si tenemos LLM data para este candidato, usar exp_years extraido
+                if cid in llm_data and "exp_years" in llm_data[cid]:
+                    exp_years_val = int(llm_data[cid].get("exp_years") or 0)
+                # Si no, usar exp_years del payload de Qdrant como fallback
+                else:
+                    exp_years_val = int(candidate_payloads.get(cid, {}).get("exp_years") or 0)
+                
+                if exp_years_val >= int(request.min_exp_years):
+                    filtered_cids.append(cid)
+            top_cids = filtered_cids
             logger.info(
                 "exp_years_post_filter",
                 min_exp_years=request.min_exp_years,
-                candidates_remaining=len(top_cids),
+                candidates_checked=len(top_cids),
+                llm_data_count=len(llm_data),
             )
 
         results: list[CandidateResult] = []
         for cid in top_cids:
+            # Priorizar LLM data; si no existe, usar Qdrant payload
             info = llm_data.get(cid, {})
+            payload = candidate_payloads.get(cid, {})
             results.append(
                 CandidateResult(
                     candidate_id=cid,
