@@ -142,6 +142,18 @@ class RAGEngine:
                 final_scores[cid] = round(candidate_scores[cid], 4)
         top_cids = sorted(top_cids, key=final_scores.__getitem__, reverse=True)
 
+        # Filtro post-LLM por exp_years (usa datos extraidos del texto del CV, no el payload Qdrant)
+        if request.min_exp_years is not None and request.min_exp_years > 0 and llm_data:
+            top_cids = [
+                cid for cid in top_cids
+                if int((llm_data.get(cid) or {}).get("exp_years") or 0) >= int(request.min_exp_years)
+            ]
+            logger.info(
+                "exp_years_post_filter",
+                min_exp_years=request.min_exp_years,
+                candidates_remaining=len(top_cids),
+            )
+
         results: list[CandidateResult] = []
         for cid in top_cids:
             info = llm_data.get(cid, {})
@@ -265,10 +277,13 @@ class RAGEngine:
 
     @staticmethod
     def _build_qdrant_filter(request: SearchRequest) -> Filter | None:
-        """Construye filtros nativos de Qdrant para busqueda directa."""
+        """Construye filtros nativos de Qdrant para busqueda directa.
+
+        NOTA: exp_years NO se filtra a nivel Qdrant porque el servicio de procesamiento
+        almacena exp_years=0 para todos los CVs (valor poco fiable). El filtro por
+        exp_years se aplica despues de la extraccion LLM, que si lee el texto real del CV.
+        """
         conditions = []
-        if request.min_exp_years is not None and request.min_exp_years > 0:
-            conditions.append(FieldCondition(key="exp_years", range=Range(gte=request.min_exp_years)))
         if request.required_location:
             conditions.append(FieldCondition(key="location", match=MatchValue(value=request.required_location)))
         return Filter(must=conditions) if conditions else None
