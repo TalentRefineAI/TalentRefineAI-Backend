@@ -26,6 +26,11 @@ logger = structlog.get_logger(__name__)
 CHUNK_SIZE = 1024
 CHUNK_OVERLAP = 100
 
+# Serializa el procesamiento dentro de la réplica: aunque lleguen varias peticiones
+# concurrentes, los CVs se indexan de uno en uno para no saturar los 10K TPM del
+# deployment de Azure OpenAI (embeddings + chat). Evita el throttling que tumbaba CVs.
+_PROCESSING_SEMAPHORE = asyncio.Semaphore(1)
+
 # Regex deterministas como refuerzo de la extraccion LLM
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}")
 # Telefono: secuencias de 9+ digitos admitiendo prefijo internacional, espacios,
@@ -47,41 +52,44 @@ class IndexingService:
 
     async def process_document(self, doc_id: uuid.UUID, blob_name: str) -> None:
         log = logger.bind(doc_id=str(doc_id), blob_name=blob_name)
-        log.info("indexing_started")
-        try:
-            pdf_bytes = await self._blob.download(blob_name)
-        except Exception as exc:
-            raise ProcessingError(f"No se pudo descargar {blob_name}: {exc}") from exc
-        try:
-            raw_text, pdf_meta = self._extract(pdf_bytes, blob_name)
-        except Exception as exc:
-            raise ProcessingError(f"Error extrayendo texto de {blob_name}: {exc}") from exc
-        clean = self._clean_text(raw_text)
-        if not clean.strip():
-            raise ProcessingError(f"PDF vacio: {blob_name}")
-        # Extrae metadatos estructurados UNA sola vez; se denormalizan en cada chunk
-        meta = await self._extract_metadata(clean)
-        log.info(
-            "metadata_extracted",
-            has_email=bool(meta.get("email")),
-            has_phone=bool(meta.get("phone")),
-            exp_years=meta.get("exp_years", 0),
-            n_skills=len(meta.get("skills", [])),
-        )
-        base_meta = CandidatePayload(
-            candidate_id=str(doc_id), file_name=blob_name,
-            contact_info={
-                "name": meta.get("name", ""),
-                "email": meta.get("email", ""),
-                "phone": meta.get("phone", ""),
-                "skills": meta.get("skills", []),
-            },
-            exp_years=int(meta.get("exp_years") or 0),
-            location=meta.get("location"),
-            chunk_text="",
-        )
-        await self.process_and_index_document(clean, base_meta)
-        log.info("indexing_completed")
+        # El semáforo serializa el trabajo pesado (descarga + LLM + embeddings + Qdrant)
+        # para no saturar la cuota de Azure OpenAI cuando llegan varios CVs.
+        async with _PROCESSING_SEMAPHORE:
+            log.info("indexing_started")
+            try:
+                pdf_bytes = await self._blob.download(blob_name)
+            except Exception as exc:
+                raise ProcessingError(f"No se pudo descargar {blob_name}: {exc}") from exc
+            try:
+                raw_text, pdf_meta = self._extract(pdf_bytes, blob_name)
+            except Exception as exc:
+                raise ProcessingError(f"Error extrayendo texto de {blob_name}: {exc}") from exc
+            clean = self._clean_text(raw_text)
+            if not clean.strip():
+                raise ProcessingError(f"PDF vacio: {blob_name}")
+            # Extrae metadatos estructurados UNA sola vez; se denormalizan en cada chunk
+            meta = await self._extract_metadata(clean)
+            log.info(
+                "metadata_extracted",
+                has_email=bool(meta.get("email")),
+                has_phone=bool(meta.get("phone")),
+                exp_years=meta.get("exp_years", 0),
+                n_skills=len(meta.get("skills", [])),
+            )
+            base_meta = CandidatePayload(
+                candidate_id=str(doc_id), file_name=blob_name,
+                contact_info={
+                    "name": meta.get("name", ""),
+                    "email": meta.get("email", ""),
+                    "phone": meta.get("phone", ""),
+                    "skills": meta.get("skills", []),
+                },
+                exp_years=int(meta.get("exp_years") or 0),
+                location=meta.get("location"),
+                chunk_text="",
+            )
+            await self.process_and_index_document(clean, base_meta)
+            log.info("indexing_completed")
 
     async def process_and_index_document(self, text: str, metadata: CandidatePayload) -> None:
         chunks: list[str] = self._splitter.split_text(text)
@@ -92,7 +100,14 @@ class IndexingService:
             embeddings = [fake_embedding(chunk) for chunk in chunks]
         else:
             try:
-                embeddings = await LlamaSettings.embed_model.aget_text_embedding_batch(chunks)
+                # Timeout de 60s como red de seguridad: con el procesamiento serializado
+                # no debería throttlear, pero evita cuelgues indefinidos por reintentos.
+                embeddings = await asyncio.wait_for(
+                    LlamaSettings.embed_model.aget_text_embedding_batch(chunks),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError as exc:
+                raise ProcessingError("Timeout generando embeddings (>60s)") from exc
             except Exception as exc:
                 raise ProcessingError(f"Error generando embeddings: {exc}") from exc
         # Include candidate_id and file_name in node metadata so LlamaIndex

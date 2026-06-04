@@ -100,7 +100,9 @@ class IngestService:
                 response = await client.post(
                     f"{base_url}/processing/{doc_id}",
                     params={"blob_name": blob_name},
-                    timeout=30.0,
+                    # El processing es síncrono (indexa antes de responder); damos margen
+                    # amplio para CV grandes + extracción LLM + embeddings.
+                    timeout=150.0,
                 )
                 response.raise_for_status()
                 logger.info("processing_triggered", doc_id=str(doc_id), blob_name=blob_name)

@@ -125,19 +125,33 @@ az containerapp revision activate   --name $CA_RAG   --resource-group $RG   --re
 ```
 
 ### Ver logs en tiempo real
+
+> **Cómo monitorizar servicios scale-to-zero:** los logs de CONSOLA solo se sirven desde una
+> réplica viva. Los servicios escalan a cero cuando están inactivos, así que para capturar logs
+> hay que **dejar `--follow` corriendo ANTES de generar la actividad** (subir CV, buscar, etc.):
+> al llegar el tráfico la réplica arranca y los logs empiezan a fluir en tu terminal.
+> Para logs históricos cuando el servicio ya está a cero, ver §9 (Log Analytics).
+
 ```bash
-# Logs de consola (requiere réplica activa — falla con "Could not find a replica" si hay 0 réplicas)
-az containerapp logs show --name $CA_RAG --resource-group $RG --follow --tail 50
+# 1) MONITOREO EN VIVO — deja esto corriendo y luego actúa en la app (sube un CV, busca, etc.)
+#    Es la forma fiable de ver el procesamiento de CVs de principio a fin.
+az containerapp logs show --name $CA_PROC --resource-group $RG --follow --tail 100
 
-# Logs de sistema — funciona SIEMPRE aunque haya 0 réplicas (muestra eventos KEDA/scaling/crashes)
-az containerapp logs show --name $CA_RAG --resource-group $RG --type system --tail 30
+# Lo mismo para rag-service (búsquedas) o ingest (subidas)
+az containerapp logs show --name $CA_RAG    --resource-group $RG --follow --tail 50
+az containerapp logs show --name $CA_INGEST --resource-group $RG --follow --tail 50
 
-# Logs del processing-service (el más útil para depurar CVs bloqueados)
-az containerapp logs show --name $CA_PROC --resource-group $RG --follow --tail 80
+# 2) EVENTOS DE SISTEMA — funciona SIEMPRE, incluso con 0 réplicas
+#    (scaling KEDA, arranques, crashes, "ManuallyStopped", OOM, etc.)
+az containerapp logs show --name $CA_PROC --resource-group $RG --type system --tail 30
 
-# Con filtro de revisión específica
-az containerapp logs show   --name $CA_RAG   --resource-group $RG   --revision ca-rag-talentrefine-dev-spc--prodfix   --follow --tail 50
+# 3) Snapshot puntual (sin --follow): solo devuelve algo si hay réplica activa en ese instante
+az containerapp logs show --name $CA_RAG --resource-group $RG --tail 50
 ```
+
+> ⚠️ `--type console` (por defecto) sin `--follow` y con 0 réplicas devuelve
+> `ERROR: Could not find a replica for this app`. No es un fallo de la app: es que está dormida.
+> Usa `--follow` (opción 1) o `--type system` (opción 2).
 
 ### Reiniciar réplicas (forzar restart sin nueva revisión)
 ```bash
@@ -343,17 +357,32 @@ terraform apply
 
 ## 9. Monitoreo y observabilidad
 
-### Ver logs de todos los servicios (Log Analytics)
+### Ver logs históricos always-on (Log Analytics)
 
-> ⚠️ **Requisito previo:** la tabla `ContainerAppConsoleLogs_CL` solo existe si el Container Apps
-> Environment tiene Diagnostic Settings activados (actualmente NO está configurado). Sin ese
-> ajuste los comandos KQL fallan. **Usar `az containerapp logs show` (sección anterior) para logs inmediatos.**
+> ⚠️ **Estado actual: NO configurado.** El Container Apps Environment `cae-talentrefine-dev-spc`
+> tiene el destino de logs vacío (`appLogsConfiguration.destination = ""`), así que la tabla
+> `ContainerAppConsoleLogs_CL` **no existe** y los comandos KQL de abajo fallan con
+> *"Failed to resolve table"*. Mientras no se active, usa el monitoreo en vivo de la §2.
 >
-> Para activar: Portal Azure → Container Apps Environment `cae-talentrefine-dev-spc`
-> → Diagnostic settings → Add → marcar "ContainerAppConsoleLogs" → seleccionar workspace `law-talentrefine-dev-spc`.
+> **Para activarlo (recomendado para monitorizar en todo momento):** vincula el entorno al
+> workspace `law-talentrefine-dev-spc`. Requiere customerId + clave compartida:
 >
-> El `--workspace` requiere el **ID** (customerId), no el nombre:
-> `LAW_ID=710642dd-24f8-45d3-9bdd-c39da3184490`
+> ```bash
+> LAW_ID=710642dd-24f8-45d3-9bdd-c39da3184490
+> LAW_KEY=$(az monitor log-analytics workspace get-shared-keys \
+>   --resource-group $RG --workspace-name law-talentrefine-dev-spc \
+>   --query primarySharedKey -o tsv)
+> az containerapp env update --name cae-talentrefine-dev-spc --resource-group $RG \
+>   --logs-destination log-analytics \
+>   --logs-workspace-id $LAW_ID --logs-workspace-key $LAW_KEY
+> ```
+>
+> 📌 La infra está gestionada por Terraform (repo `TalentRefineAI-Infra`). Para que el cambio
+> **persista** y no se revierta en el próximo `terraform apply`, añádelo también al módulo
+> `monitoring`/`compute` (bloque `log_analytics_workspace` del `azurerm_container_app_environment`).
+> Los logs tardan ~2-5 min en empezar a aparecer tras activarlo.
+
+Una vez activado, el `--workspace` usa el **ID** (customerId), no el nombre:
 
 ```bash
 LAW_ID=710642dd-24f8-45d3-9bdd-c39da3184490
@@ -363,9 +392,9 @@ az monitor log-analytics query --workspace $LAW_ID \
   --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == 'ca-rag-talentrefine-dev-spc' | order by TimeGenerated desc | take 50" \
   --output table
 
-# Logs de errores en todos los servicios
+# Errores en todos los servicios (última hora)
 az monitor log-analytics query --workspace $LAW_ID \
-  --analytics-query "ContainerAppConsoleLogs_CL | where Log_s contains 'ERROR' | order by TimeGenerated desc | take 100" \
+  --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(1h) | where Log_s contains 'error' or Log_s contains 'failed' | order by TimeGenerated desc | take 100" \
   --output table
 ```
 
