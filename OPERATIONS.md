@@ -126,9 +126,16 @@ az containerapp revision activate   --name $CA_RAG   --resource-group $RG   --re
 
 ### Ver logs en tiempo real
 ```bash
-az containerapp logs show   --name $CA_RAG   --resource-group $RG   --follow --tail 50
+# Logs de consola (requiere réplica activa — falla con "Could not find a replica" si hay 0 réplicas)
+az containerapp logs show --name $CA_RAG --resource-group $RG --follow --tail 50
 
-# Con filtro de revisión
+# Logs de sistema — funciona SIEMPRE aunque haya 0 réplicas (muestra eventos KEDA/scaling/crashes)
+az containerapp logs show --name $CA_RAG --resource-group $RG --type system --tail 30
+
+# Logs del processing-service (el más útil para depurar CVs bloqueados)
+az containerapp logs show --name $CA_PROC --resource-group $RG --follow --tail 80
+
+# Con filtro de revisión específica
 az containerapp logs show   --name $CA_RAG   --resource-group $RG   --revision ca-rag-talentrefine-dev-spc--prodfix   --follow --tail 50
 ```
 
@@ -337,14 +344,29 @@ terraform apply
 ## 9. Monitoreo y observabilidad
 
 ### Ver logs de todos los servicios (Log Analytics)
-Los Container Apps envían logs a Log Analytics automáticamente.
+
+> ⚠️ **Requisito previo:** la tabla `ContainerAppConsoleLogs_CL` solo existe si el Container Apps
+> Environment tiene Diagnostic Settings activados (actualmente NO está configurado). Sin ese
+> ajuste los comandos KQL fallan. **Usar `az containerapp logs show` (sección anterior) para logs inmediatos.**
+>
+> Para activar: Portal Azure → Container Apps Environment `cae-talentrefine-dev-spc`
+> → Diagnostic settings → Add → marcar "ContainerAppConsoleLogs" → seleccionar workspace `law-talentrefine-dev-spc`.
+>
+> El `--workspace` requiere el **ID** (customerId), no el nombre:
+> `LAW_ID=710642dd-24f8-45d3-9bdd-c39da3184490`
 
 ```bash
+LAW_ID=710642dd-24f8-45d3-9bdd-c39da3184490
+
 # Logs del rag-service (últimas 50 entradas)
-az monitor log-analytics query   --workspace "la-talentrefine-dev-spc"   --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == 'ca-rag-talentrefine-dev-spc' | order by TimeGenerated desc | take 50"   --output table
+az monitor log-analytics query --workspace $LAW_ID \
+  --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == 'ca-rag-talentrefine-dev-spc' | order by TimeGenerated desc | take 50" \
+  --output table
 
 # Logs de errores en todos los servicios
-az monitor log-analytics query   --workspace "la-talentrefine-dev-spc"   --analytics-query "ContainerAppConsoleLogs_CL | where Log_s contains 'ERROR' or Log_s contains 'error' | order by TimeGenerated desc | take 100"   --output table
+az monitor log-analytics query --workspace $LAW_ID \
+  --analytics-query "ContainerAppConsoleLogs_CL | where Log_s contains 'ERROR' | order by TimeGenerated desc | take 100" \
+  --output table
 ```
 
 ### Consultas KQL útiles

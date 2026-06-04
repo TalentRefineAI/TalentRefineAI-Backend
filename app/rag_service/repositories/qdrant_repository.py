@@ -75,15 +75,20 @@ class QdrantRepository:
                     continue
                 seen.add(cid)
 
-                # Nombre limpio desde file_name
+                # Nombre limpio desde file_name (fallback si el payload no trae nombre)
                 raw_fname = payload.get("file_name", "")
                 fname = raw_fname.split("/")[-1] if "/" in raw_fname else raw_fname
-                name = fname.rsplit(".", 1)[0] if "." in fname else fname or cid
+                name_from_file = fname.rsplit(".", 1)[0] if "." in fname else fname or cid
 
-                # Email extraído por regex desde el chunk de texto
-                chunk = payload.get("chunk_text", "")
-                m = _EMAIL.search(chunk)
-                email = m.group() if m else ""
+                # Metadatos denormalizados en el payload (extraidos en el procesamiento).
+                # Fallback retrocompatible para datos antiguos: nombre desde filename,
+                # email por regex sobre el chunk de texto.
+                contact = payload.get("contact_info") or {}
+                name = (contact.get("name") or "").strip() or name_from_file
+                email = (contact.get("email") or "").strip()
+                if not email:
+                    m = _EMAIL.search(payload.get("chunk_text", ""))
+                    email = m.group() if m else ""
 
                 candidates.append({
                     "candidate_id": cid,

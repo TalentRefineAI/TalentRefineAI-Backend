@@ -79,12 +79,14 @@ class QdrantRepository:
                     logger.warning("node_without_embedding", node_id=node.node_id)
                     continue
 
+            # Denormaliza los metadatos del candidato en CADA chunk para que el panel
+            # y la busqueda los lean del payload sin depender de que chunk se recupere.
             payload = CandidatePayload(
                 candidate_id=str(doc_id),
                 file_name=doc_metadata.get("file_name", ""),
-                contact_info={},
-                exp_years=0,
-                location=None,
+                contact_info=doc_metadata.get("contact_info") or {},
+                exp_years=int(doc_metadata.get("exp_years") or 0),
+                location=doc_metadata.get("location"),
                 chunk_text=content,
             ).model_dump()
             # Add LlamaIndex-required fields so the RAG retriever can reconstruct TextNodes

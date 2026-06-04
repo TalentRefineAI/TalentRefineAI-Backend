@@ -1,7 +1,8 @@
-"""Cliente Azure OpenAI para embeddings – processing-service."""
+"""Clientes Azure OpenAI (embedding + chat) – processing-service."""
 from functools import lru_cache
 
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
+from llama_index.llms.azure_openai import AzureOpenAI
 from shared.config import get_secret, get_settings
 
 
@@ -19,6 +20,24 @@ def get_embed_model() -> AzureOpenAIEmbedding:
     return AzureOpenAIEmbedding(
         model=settings.azure_openai_embedding_model,
         deployment_name=settings.azure_openai_embedding_deployment,
+        api_key=api_key,
+        azure_endpoint=settings.azure_openai_endpoint,
+        api_version=settings.azure_openai_api_version,
+    )
+
+
+@lru_cache
+def get_llm() -> AzureOpenAI:
+    """
+    Devuelve el modelo de chat de Azure OpenAI (gpt-4o-mini).
+    Usado para extraer metadatos estructurados del CV en el procesamiento inicial.
+    """
+    settings = get_settings()
+    # La misma clave sirve para embedding y chat en el mismo recurso Azure OpenAI
+    api_key = get_secret("azure-openai-api-key")
+    return AzureOpenAI(
+        model=settings.azure_openai_chat_model,
+        deployment_name=settings.azure_openai_chat_deployment,
         api_key=api_key,
         azure_endpoint=settings.azure_openai_endpoint,
         api_version=settings.azure_openai_api_version,

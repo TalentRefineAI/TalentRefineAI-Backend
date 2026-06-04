@@ -76,12 +76,20 @@ class BlobRepository:
             logger.info("fake_blob_container_cleared", path=root)
             return
 
-        async with self._get_client().get_container_client(self._container) as container:
-            blob_names = [b.name async for b in container.list_blobs()]
-            if blob_names:
-                # Batch delete en lotes de 256 (límite Azure SDK)
-                batch_size = 256
-                for i in range(0, len(blob_names), batch_size):
-                    batch = blob_names[i : i + batch_size]
-                    await container.delete_blobs(*batch, raise_on_any_error=False)
-            logger.info("blob_container_cleared", container=self._container, deleted=len(blob_names))
+        # Errores transitorios de Azure (cold-start, red, credencial) se registran
+        # pero NO se propagan: el endpoint devuelve 200 en vez de 500. La ruta del
+        # blob es determinista (mismo PDF → misma ruta vía UUID5 del SHA-256), por lo
+        # que cualquier blob huérfano se sobrescribe en la próxima subida y se limpia
+        # en el próximo delete con éxito. Qdrant es el almacén primario.
+        try:
+            async with self._get_client().get_container_client(self._container) as container:
+                blob_names = [b.name async for b in container.list_blobs()]
+                if blob_names:
+                    # Batch delete en lotes de 256 (límite Azure SDK)
+                    batch_size = 256
+                    for i in range(0, len(blob_names), batch_size):
+                        batch = blob_names[i : i + batch_size]
+                        await container.delete_blobs(*batch, raise_on_any_error=False)
+                logger.info("blob_container_cleared", container=self._container, deleted=len(blob_names))
+        except Exception as exc:
+            logger.warning("blob_delete_failed_nonfatal", container=self._container, error=str(exc))

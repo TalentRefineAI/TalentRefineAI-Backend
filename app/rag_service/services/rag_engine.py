@@ -183,13 +183,11 @@ class RAGEngine:
         if request.min_exp_years is not None and request.min_exp_years > 0:
             filtered_cids = []
             for cid in top_cids:
-                # Si tenemos LLM data para este candidato, usar exp_years extraido
-                if cid in llm_data and "exp_years" in llm_data[cid]:
-                    exp_years_val = int(llm_data[cid].get("exp_years") or 0)
-                # Si no, usar exp_years del payload de Qdrant como fallback
-                else:
-                    exp_years_val = int(candidate_payloads.get(cid, {}).get("exp_years") or 0)
-                
+                # Prioridad al payload (extraido en procesamiento, fiable); fallback al LLM
+                payload_exp = int(candidate_payloads.get(cid, {}).get("exp_years") or 0)
+                llm_exp = int(llm_data.get(cid, {}).get("exp_years") or 0)
+                exp_years_val = payload_exp or llm_exp
+
                 if exp_years_val >= int(request.min_exp_years):
                     filtered_cids.append(cid)
             top_cids = filtered_cids
@@ -202,9 +200,13 @@ class RAGEngine:
 
         results: list[CandidateResult] = []
         for cid in top_cids:
-            # Priorizar LLM data; si no existe, usar Qdrant payload
             info = llm_data.get(cid, {})
             payload = candidate_payloads.get(cid, {})
+            # Metadatos: prioridad al payload (extraido en el procesamiento, fiable e
+            # independiente de que chunk se haya recuperado); fallback al LLM para datos
+            # antiguos sin metadatos denormalizados. summary/justification dependen de la
+            # query → siempre del LLM.
+            p_contact = payload.get("contact_info") or {}
             results.append(
                 CandidateResult(
                     candidate_id=cid,
@@ -213,13 +215,13 @@ class RAGEngine:
                     summary=info.get("summary", ""),
                     justification=info.get("justification", ""),
                     contact_info={
-                        "name": info.get("name", ""),
-                        "email": info.get("email", ""),
-                        "phone": info.get("phone", ""),
-                        "skills": info.get("skills", []),
+                        "name": p_contact.get("name") or info.get("name", ""),
+                        "email": p_contact.get("email") or info.get("email", ""),
+                        "phone": p_contact.get("phone") or info.get("phone", ""),
+                        "skills": p_contact.get("skills") or info.get("skills", []),
                     },
-                    exp_years=int(info.get("exp_years") or 0),
-                    location=info.get("location"),
+                    exp_years=int(payload.get("exp_years") or info.get("exp_years") or 0),
+                    location=payload.get("location") or info.get("location"),
                 )
             )
 
