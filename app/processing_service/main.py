@@ -31,15 +31,10 @@ def create_app() -> FastAPI:
     # Este servicio es interno; no expone CORS al exterior
 
     @app.get("/health", tags=["health"])
-    async def health() -> dict:
-        # Comprueba que el servicio esta vivo; no requiere conexion con Azure
+    async def health() -> dict[str, str]:
         return {"status": "ok", "service": "processing-service"}
 
     app.include_router(processing.router, prefix="/processing", tags=["processing"])
-
-    @app.get("/health", tags=["health"])
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "service": "processing-service"}
 
     return app
 

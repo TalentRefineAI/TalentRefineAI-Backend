@@ -6,7 +6,7 @@ import structlog
 from llama_index.core.schema import BaseNode
 from llama_index.core.vector_stores.utils import node_to_metadata_dict
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
 
 from shared.config import get_secret, get_settings
 from shared.fakes import fake_embedding
@@ -46,6 +46,14 @@ class QdrantRepository:
                 vectors_config=VectorParams(size=self._vector_size, distance=Distance.COSINE),
             )
             logger.info("qdrant_collection_created", collection=self._collection)
+            # Índice en candidate_id para acelerar scroll+dedup en list_candidates
+            from qdrant_client.models import PayloadSchemaType
+            await self._client.create_payload_index(
+                collection_name=self._collection,
+                field_name="candidate_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            logger.info("qdrant_payload_index_created", field="candidate_id")
 
     async def upsert_nodes(
         self,
@@ -71,12 +79,14 @@ class QdrantRepository:
                     logger.warning("node_without_embedding", node_id=node.node_id)
                     continue
 
+            # Denormaliza los metadatos del candidato en CADA chunk para que el panel
+            # y la busqueda los lean del payload sin depender de que chunk se recupere.
             payload = CandidatePayload(
                 candidate_id=str(doc_id),
                 file_name=doc_metadata.get("file_name", ""),
-                contact_info={},
-                exp_years=0,
-                location=None,
+                contact_info=doc_metadata.get("contact_info") or {},
+                exp_years=int(doc_metadata.get("exp_years") or 0),
+                location=doc_metadata.get("location"),
                 chunk_text=content,
             ).model_dump()
             # Add LlamaIndex-required fields so the RAG retriever can reconstruct TextNodes
@@ -87,6 +97,13 @@ class QdrantRepository:
             points.append(PointStruct(id=node.node_id, vector=embedding, payload=payload))
 
         if points:
+            # Elimina puntos anteriores del mismo candidato para evitar duplicados
+            await self._client.delete(
+                collection_name=self._collection,
+                points_selector=Filter(
+                    must=[FieldCondition(key="candidate_id", match=MatchValue(value=str(doc_id)))]
+                ),
+            )
             logger.info("qdrant_upserting", n_points=len(points))
             await self._client.upsert(collection_name=self._collection, points=points)
             logger.info("qdrant_upsert", collection=self._collection, points=len(points))

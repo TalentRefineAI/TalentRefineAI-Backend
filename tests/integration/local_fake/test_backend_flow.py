@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import append_evidence, assert_no_processing_critical_errors, search_candidates
+from .conftest import append_evidence, assert_no_processing_critical_errors, list_candidates, search_candidates
 
 
 @pytest.mark.integration
@@ -129,3 +129,36 @@ def test_local_fake_backend_flow(local_fake_stack: dict[str, Any], upload_pdf) -
         },
     )
     assert_no_processing_critical_errors(log_dir)
+
+
+@pytest.mark.integration
+def test_list_candidates_endpoint(local_fake_stack: dict[str, Any], upload_pdf) -> None:
+    """GET /search/candidates devuelve candidatos tras la indexación del CV subido."""
+    service_urls = local_fake_stack["service_urls"]
+    log_dir = local_fake_stack["log_dir"]
+
+    # Ensure at least one candidate is uploaded and indexed
+    upload_result = upload_pdf(filename="listtest.pdf", text="Python Backend Engineer FastAPI")
+    assert upload_result["status_code"] == 202, f"Upload failed: {upload_result}"
+
+    # Poll the list endpoint until a candidate appears (max 120s)
+    deadline = time.time() + 120
+    body: dict[str, Any] = {}
+    while time.time() < deadline:
+        raw = list_candidates(service_urls, timeout=30)
+        if raw["status_code"] == 200:
+            body = json.loads(raw["text"])
+            if body.get("total", 0) > 0:
+                break
+        time.sleep(5)
+
+    append_evidence(log_dir, "list_candidates_response", body)
+
+    assert body.get("total", 0) > 0, "Expected at least 1 candidate in Qdrant after upload"
+    candidates = body.get("candidates", [])
+    assert isinstance(candidates, list)
+    first = candidates[0]
+    assert "candidate_id" in first, "Missing candidate_id in list response"
+    assert "name" in first, "Missing name in list response"
+    assert "email" in first, "Missing email in list response"
+    assert "file_name" in first, "Missing file_name in list response"

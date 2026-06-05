@@ -1,4 +1,5 @@
 """Lógica de negocio de ingesta – ingest-service."""
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -35,8 +36,10 @@ class IngestService:
                 results.append({"file_name": file.filename, "error": "Solo se admiten archivos PDF"})
                 continue
 
-            # Genera un identificador unico para rastrear este documento
-            doc_id = uuid.uuid4()
+            # Lee el contenido para generar UUID deterministico (evita duplicados del mismo PDF)
+            content_bytes = await file.read()
+            sha256 = hashlib.sha256(content_bytes).hexdigest()
+            doc_id = uuid.uuid5(uuid.NAMESPACE_URL, sha256)
             now = datetime.now(timezone.utc)
             status = DocumentStatus(
                 id=doc_id,
@@ -48,7 +51,7 @@ class IngestService:
             self._status_store[doc_id] = status
 
             # Delega la subida real a Blob como tarea en segundo plano
-            background_tasks.add_task(self._process_upload, doc_id, file)
+            background_tasks.add_task(self._process_upload, doc_id, content_bytes, file.filename or "unknown.pdf")
             results.append({"id": str(doc_id), "file_name": file.filename, "status": ProcessingStatus.PENDING})
 
         return results
@@ -59,17 +62,21 @@ class IngestService:
             raise KeyError(doc_id)
         return self._status_store[doc_id]
 
-    async def _process_upload(self, doc_id: uuid.UUID, file: UploadFile) -> None:
+    async def download_document(self, doc_id: uuid.UUID, filename: str) -> bytes:
+        """Descarga el PDF de un documento desde Blob Storage."""
+        blob_name = f"{doc_id}/{filename}"
+        return await self._blob.download(blob_name)
+
+
+    async def _process_upload(self, doc_id: uuid.UUID, content: bytes, filename: str) -> None:
         """Tarea de background: sube el PDF a Blob Storage y dispara el processing-service."""
         record = self._status_store[doc_id]
-        # Marca el documento como en procesamiento antes de empezar la subida
         record.status = ProcessingStatus.PROCESSING
         record.updated_at = datetime.now(timezone.utc)
 
         try:
-            content = await file.read()
             # La ruta en Blob incluye el doc_id para evitar colisiones de nombre
-            blob_name = f"{doc_id}/{file.filename}"
+            blob_name = f"{doc_id}/{filename}"
             await self._blob.upload(blob_name, content, content_type="application/pdf")
             logger.info("blob_uploaded", doc_id=str(doc_id), blob=blob_name)
 
@@ -93,10 +100,18 @@ class IngestService:
                 response = await client.post(
                     f"{base_url}/processing/{doc_id}",
                     params={"blob_name": blob_name},
-                    timeout=10.0,
+                    # El processing es síncrono (indexa antes de responder); damos margen
+                    # amplio para CV grandes + extracción LLM + embeddings.
+                    timeout=150.0,
                 )
                 response.raise_for_status()
                 logger.info("processing_triggered", doc_id=str(doc_id), blob_name=blob_name)
             except httpx.HTTPError as exc:
                 logger.error("processing_trigger_failed", doc_id=str(doc_id), error=str(exc))
                 raise
+
+    async def delete_all_documents(self) -> None:
+        """Elimina todos los documentos del Blob Storage y limpia el estado en memoria."""
+        await self._blob.delete_all()
+        self._status_store.clear()
+        logger.info("all_documents_deleted")
