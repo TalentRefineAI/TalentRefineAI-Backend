@@ -97,10 +97,15 @@ az containerapp revision list --name $CA_RAG --resource-group $RG --output table
 ### Desplegar nueva revisión (actualizar imagen)
 ```bash
 # Crear nueva revisión con suffix personalizado
-az containerapp update   --name $CA_RAG   --resource-group $RG   --image $ACR.azurecr.io/rag-service:latest   --revision-suffix v20250601
+az containerapp update   --name $CA_RAG   --resource-group $RG   --image $ACR.azurecr.io/rag-service:latest   --revision-suffix v20260605
+
+az containerapp update   --name $CA_PROC   --resource-group $RG   --image $ACR.azurecr.io/processing-service:latest   --revision-suffix v20260605
+
+az containerapp update   --name $CA_INGEST   --resource-group $RG   --image $ACR.azurecr.io/ingest-service:latest   --revision-suffix v20260605
+
 
 # Lo mismo para frontend
-az containerapp update   --name $CA_FRONTEND   --resource-group $RG   --image $ACR.azurecr.io/rag-hr-frontend:latest   --revision-suffix v20250601
+az containerapp update   --name $CA_FRONTEND   --resource-group $RG   --image $ACR.azurecr.io/rag-hr-frontend:latest   --revision-suffix v20260605
 ```
 
 ### Ver tráfico entre revisiones
@@ -114,7 +119,7 @@ az containerapp ingress traffic show --name $CA_RAG --resource-group $RG
 az containerapp ingress traffic set   --name $CA_RAG   --resource-group $RG   --revision-weight ca-rag-talentrefine-dev-spc--prodfix=100
 
 # Canary: 90% stable, 10% nueva
-az containerapp ingress traffic set   --name $CA_RAG   --resource-group $RG   --revision-weight ca-rag-talentrefine-dev-spc--prodfix=90                     ca-rag-talentrefine-dev-spc--v20250601=10
+az containerapp ingress traffic set   --name $CA_RAG   --resource-group $RG   --revision-weight ca-rag-talentrefine-dev-spc--prodfix=90                     ca-rag-talentrefine-dev-spc--v20260605=10
 ```
 
 ### Desactivar/activar una revisión

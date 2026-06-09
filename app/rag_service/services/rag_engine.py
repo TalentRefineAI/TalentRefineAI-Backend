@@ -198,6 +198,25 @@ class RAGEngine:
                 llm_data_count=len(llm_data),
             )
 
+        # Filtro post-LLM por location (substring, case-insensitive)
+        # El campo location es free-text LLM; MatchValue exacto nunca hace match.
+        # Buscamos substring: "Madrid" debe matchear "Madrid, Spain", "Madrid (España)", etc.
+        if request.required_location:
+            loc_query = request.required_location.lower()
+            filtered_cids = []
+            for cid in top_cids:
+                payload_loc = (candidate_payloads.get(cid, {}).get("location") or "").lower()
+                llm_loc = (llm_data.get(cid, {}).get("location") or "").lower()
+                candidate_loc = payload_loc or llm_loc
+                if loc_query in candidate_loc:
+                    filtered_cids.append(cid)
+            top_cids = filtered_cids
+            logger.info(
+                "location_post_filter",
+                required_location=request.required_location,
+                candidates_after_filter=len(top_cids),
+            )
+
         results: list[CandidateResult] = []
         for cid in top_cids:
             info = llm_data.get(cid, {})
@@ -332,10 +351,13 @@ class RAGEngine:
         NOTA: exp_years NO se filtra a nivel Qdrant porque el servicio de procesamiento
         almacena exp_years=0 para todos los CVs (valor poco fiable). El filtro por
         exp_years se aplica despues de la extraccion LLM, que si lee el texto real del CV.
+
+        NOTA: location NO se filtra a nivel Qdrant porque es free-text LLM ("Madrid, Spain")
+        que nunca hace match exacto con MatchValue ("Madrid"). El filtro por location se
+        aplica Python-side despues de retrieval, con substring/contains (case-insensitive).
         """
         conditions = []
-        if request.required_location:
-            conditions.append(FieldCondition(key="location", match=MatchValue(value=request.required_location)))
+        # location filtering moved to Python-side post-filter (_search_azure, after exp_years)
         return Filter(must=conditions) if conditions else None
 
     @staticmethod
@@ -346,7 +368,7 @@ class RAGEngine:
                 return False
         if request.required_location:
             loc = payload.get("location", "") or ""
-            if loc.lower() != request.required_location.lower():
+            if request.required_location.lower() not in loc.lower():
                 return False
         return True
 

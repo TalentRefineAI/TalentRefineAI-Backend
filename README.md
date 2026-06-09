@@ -1,6 +1,6 @@
 # TalentRefineAI-Backend
 
-Backend del sistema **TalentRefine AI**, plataforma de reclutamiento inteligente que permite buscar candidatos mediante lenguaje natural. Procesa CVs en PDF, los indexa en Qdrant y responde consultas con candidatos ordenados por relevancia, resumen y justificación generados por GPT-4o-mini.
+Backend del sistema **TalentRefine AI**, plataforma de reclutamiento inteligente que procesa CVs en PDF, los indexa en Qdrant con metadatos extraídos por IA, y responde consultas semánticas con candidatos ordenados por score híbrido (coseno + relevancia LLM).
 
 ---
 
@@ -8,10 +8,10 @@ Backend del sistema **TalentRefine AI**, plataforma de reclutamiento inteligente
 
 | Rama | Estado |
 |------|--------|
-| `dev` | ✅ Producción desplegada en Azure Container Apps |
+| `dev` | Rama de desarrollo activa — **HEAD actual en producción** |
 | `main` | Rama estable (merges desde `dev`) |
 
-**URL del frontend en producción:**
+**Frontend en producción:**
 `https://ca-frontend-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io`
 
 ---
@@ -23,36 +23,46 @@ Tres microservicios FastAPI independientes, cada uno con su propio Dockerfile:
 ```
 app/
 ├── ingest_service/       # :8000 — Recibe PDFs y los sube a Azure Blob Storage
-├── processing_service/   # :8002 — Extrae texto, chunking y vectoriza en Qdrant
+├── processing_service/   # :8002 — Extrae texto, metadatos LLM, chunking y vectoriza en Qdrant
 ├── rag_service/          # :8001 — Búsqueda semántica RAG + scoring híbrido LLM
 └── shared/               # Configuración, modelos Pydantic, excepciones y fakes
 ```
 
-### Flujo de ingesta (background task)
+### Flujo de ingesta (síncrono, serializado)
 
 ```
 Frontend
   └─→ POST /upload (ingest-service)
         └─→ Azure Blob Storage (guarda PDF)
-              └─→ background task → POST /processing/{doc_id} (processing-service)
-                    ├─→ PyMuPDF extracción de texto
-                    ├─→ SentenceSplitter chunking
-                    ├─→ text-embedding-3-small (Azure OpenAI)
-                    └─→ Qdrant upsert (colección talentrefine-candidates)
+              └─→ POST /processing/{doc_id} (processing-service, espera respuesta)
+                    ├─→ PyMuPDF + pypdf: extracción de texto completo
+                    ├─→ GPT-4o-mini: extrae nombre, email, teléfono, ubicación,
+                    │   años de experiencia y skills del CV completo
+                    ├─→ Regex: refuerzo determinista de email y teléfono
+                    ├─→ SentenceSplitter: chunking (1024 tokens, overlap 100)
+                    ├─→ text-embedding-3-small: embeddings por chunk
+                    └─→ Qdrant upsert: cada chunk lleva los metadatos del candidato
+                        en su payload (denormalizados)
 ```
+
+> **Diseño clave — procesamiento síncrono + semáforo:** el endpoint `/processing/{doc_id}` es síncrono (no usa BackgroundTasks). Un `asyncio.Semaphore(1)` serializa los CVs dentro de la réplica para no saturar los 10K TPM de Azure OpenAI. Azure Container Apps mantiene la réplica viva mientras hay una petición HTTP activa, lo que evita el problema de CVs quedados "en proceso" que ocurría con el enfoque async anterior (KEDA terminaba la réplica tras el 202).
 
 ### Flujo de búsqueda (síncrono)
 
 ```
 Frontend
   └─→ POST /search (rag-service)
-        ├─→ Embed query (text-embedding-3-small)
-        ├─→ Qdrant top-k×3 con MetadataFilters
-        ├─→ Group by candidate_id → mejor coseno por candidato
-        ├─→ GPT-4o-mini: extrae info + relevance_score 0-100
+        ├─→ text-embedding-3-small: embed query
+        ├─→ Qdrant query_points (top_k×3, sin filtro de location a nivel Qdrant)
+        ├─→ Agrupa chunks por candidate_id → mejor coseno por candidato
+        ├─→ GPT-4o-mini: extrae info + relevance_score 0-100 de todos los candidatos
         ├─→ Score híbrido = 0.4×coseno_normalizado + 0.6×(relevance_score/100)
+        ├─→ Filtro post-LLM por exp_years (usa payload; fallback a LLM)
+        ├─→ Filtro post-LLM por location (substring, case-insensitive)
         └─→ CandidateResult[] ordenados por score final
 ```
+
+> **Filtro de location:** se aplica en Python post-retrieval con substring matching (`"Madrid" in "Madrid, Spain"`), no a nivel Qdrant, porque el campo es texto libre generado por LLM.
 
 ---
 
@@ -83,14 +93,15 @@ Frontend
 | `QDRANT_COLLECTION` | Nombre de colección | `talentrefine-candidates` |
 | `AZURE_OPENAI_ENDPOINT` | Endpoint Azure OpenAI | `https://oai-xxx.openai.azure.com/` |
 | `AZURE_OPENAI_API_VERSION` | Versión API | `2024-02-01` |
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Deployment de chat | `gpt-4o-mini` |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Deployment de chat (extracción + búsqueda) | `gpt-4o-mini` |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Deployment embedding | `text-embedding-3-small` |
 | `AZURE_STORAGE_ACCOUNT_URL` | URL de Storage Account | `https://stxxx.blob.core.windows.net/` |
 | `BLOB_CONTAINER_NAME` | Contenedor de blobs | `cv-uploads` |
-| `USE_FAKE_INTEGRATIONS` | Modo fake local | `false` |
-| `INGEST_SERVICE_URL` | URL ingest (para processing) | `http://ingest:8000` |
+| `USE_FAKE_INTEGRATIONS` | Modo fake local (sin Azure) | `false` |
+| `INGEST_SERVICE_URL` | URL ingest (para health checks internos) | `http://ingest:8000` |
+| `PROCESSING_SERVICE_URL` | URL processing (llamada desde ingest) | `http://processing:8002` |
 
-Secretos almacenados en Azure Key Vault (vía `get_secret()`):
+Secretos en Azure Key Vault (vía `get_secret()`):
 - `azure-openai-api-key`
 - `qdrant-api-key`
 
@@ -132,9 +143,9 @@ pytest tests/integration/ -v
 
 | Método | Ruta | Descripción |
 |--------|------|-------------|
-| `POST` | `/upload` | Sube PDFs; responde `{data: [{id, file_name, status}]}` |
+| `POST` | `/upload` | Sube PDFs (multipart); responde `{data: [{id, file_name, status}]}` |
 | `GET` | `/upload/{doc_id}/status` | Estado de procesamiento del documento |
-| `GET` | `/upload/{doc_id}/download` | Descarga PDF |
+| `GET` | `/upload/{doc_id}/download` | Descarga PDF desde Blob Storage |
 | `DELETE` | `/upload/all` | Elimina todos los blobs del contenedor |
 | `GET` | `/health` | `{"status":"ok","service":"ingest-service"}` |
 
@@ -143,7 +154,7 @@ pytest tests/integration/ -v
 | Método | Ruta | Descripción |
 |--------|------|-------------|
 | `POST` | `/search` | Búsqueda RAG; body: `SearchRequest` |
-| `GET` | `/search/candidates` | Lista candidatos indexados |
+| `GET` | `/search/candidates` | Lista candidatos indexados (desde Qdrant) |
 | `DELETE` | `/search/candidates` | Vacía la colección Qdrant |
 | `GET` | `/health` | `{"status":"ok","service":"rag-service"}` |
 
@@ -163,29 +174,56 @@ pytest tests/integration/ -v
   "candidate_id": "uuid",
   "file_name": "cv.pdf",
   "score": 0.82,
-  "summary": "Resumen en 2-3 frases generado por LLM.",
-  "justification": "Motivo de encaje generado por LLM.",
-  "contact_info": {"name": "...", "email": "...", "phone": "...", "skills": []},
+  "summary": "Resumen profesional generado por LLM.",
+  "justification": "Motivo de encaje con el puesto generado por LLM.",
+  "contact_info": {
+    "name": "Ana García",
+    "email": "ana@example.com",
+    "phone": "+34 600 000 000",
+    "skills": ["Python", "FastAPI", "Docker"]
+  },
   "exp_years": 5,
-  "location": "Madrid"
+  "location": "Madrid, Spain"
 }
 ```
 
-> `score` = score híbrido 0-1. El frontend lo multiplica ×100 para mostrar %.
+> `score` es el score híbrido 0-1. El frontend lo multiplica ×100 para mostrar %.
+> `contact_info` y `location` se leen del payload Qdrant (extraídos en el procesamiento inicial), con fallback al LLM de búsqueda para CVs indexados antes del sistema de metadatos.
 
 ### processing-service (`:8002`)
 
 | Método | Ruta | Descripción |
 |--------|------|-------------|
-| `POST` | `/processing/{doc_id}` | Extrae texto + embedding + upsert Qdrant |
+| `POST` | `/processing/{doc_id}` | Procesa un CV: extrae texto + metadatos LLM + embeddings + upsert Qdrant. **Síncrono** — responde tras completar la indexación. |
 | `GET` | `/health` | `{"status":"ok","service":"processing-service"}` |
+
+### Payload por chunk en Qdrant
+
+Cada chunk almacenado en Qdrant incluye los siguientes campos en su payload:
+
+```json
+{
+  "candidate_id": "uuid",
+  "file_name": "cv.pdf",
+  "chunk_text": "texto del fragmento",
+  "contact_info": {
+    "name": "Ana García",
+    "email": "ana@example.com",
+    "phone": "+34 600 000 000",
+    "skills": ["Python", "FastAPI"]
+  },
+  "exp_years": 5,
+  "location": "Madrid, Spain"
+}
+```
+
+Los metadatos (`contact_info`, `exp_years`, `location`) se extraen una sola vez del CV completo en el processing-service y se **denormalizan en todos los chunks**. Así la búsqueda vectorial siempre devuelve metadatos completos independientemente de qué fragmento tenga mayor similitud semántica con la query.
 
 ---
 
 ## Despliegue en producción
 
-Ver **[OPERATIONS.md](OPERATIONS.md)** para todos los comandos de gestión, despliegue,
-mantenimiento, rollback y monitoreo del sistema en Azure.
+Ver **[OPERATIONS.md](OPERATIONS.md)** para todos los comandos de gestión, despliegue, mantenimiento, rollback y monitoreo del sistema en Azure.
 
 ---
 
@@ -193,7 +231,7 @@ mantenimiento, rollback y monitoreo del sistema en Azure.
 
 ```
 main  ← rama estable
- └── dev  ← rama de desarrollo activa (actual HEAD producción)
+ └── dev  ← rama de desarrollo activa (HEAD en producción)
 ```
 
 Para desplegar cambios:
