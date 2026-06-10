@@ -22,8 +22,8 @@ No se busca una plataforma completa de observabilidad. Se prioriza bajo coste, p
 
 - Logs estructurados JSON en backend.
 - Correlacion minima por `request_id` y `doc_id`.
-- Medicion de duracion por request HTTP.
-- Eventos clave de ingesta, procesamiento y busqueda RAG.
+- Medicion de duracion solo en errores, warnings, requests lentas y exitos finales relevantes.
+- Eventos clave de exito, warning y error en ingesta, procesamiento y busqueda RAG.
 - Uso de Log Analytics para consultar logs de Container Apps.
 - Health checks existentes (`/health`) y healthcheck Streamlit (`/_stcore/health`).
 - KQL basico para errores, latencia, flujo RAG y dependencias criticas.
@@ -41,6 +41,25 @@ No se busca una plataforma completa de observabilidad. Se prioriza bajo coste, p
 - Monitorizacion de PII, prompts completos o contenido de CVs.
 
 Application Insights ya existe en Terraform y se inyecta como `APPLICATIONINSIGHTS_CONNECTION_STRING`, pero en este MVP no es obligatorio instrumentarlo desde codigo. La fuente principal sera `stdout` de Container Apps hacia Log Analytics.
+
+## Politica de niveles para coste minimo
+
+Para reducir costes, Azure no debe operar con `LOG_LEVEL=INFO`.
+
+Politica recomendada:
+
+- `SUCCESS`: exitos finales imprescindibles para evidenciar el flujo MVP.
+- `WARNING`: degradaciones, reintentos, datos incompletos, dependencias lentas o respuestas HTTP 4xx.
+- `ERROR`: excepciones, fallos de dependencias, respuestas HTTP 5xx y flujos no completados.
+
+No se registran logs `INFO` en Azure. Si hace falta depurar, se puede activar `INFO` temporalmente en dev durante una ventana corta y volver despues al nivel reducido.
+
+Como Python logging no trae `SUCCESS` por defecto, hay dos opciones:
+
+1. Opcion recomendada: definir un nivel custom `SUCCESS = 25`, por encima de `INFO` y por debajo de `WARNING`. En Azure usar `LOG_LEVEL=SUCCESS`.
+2. Opcion mas restrictiva: no crear nivel custom y usar `LOG_LEVEL=WARNING`; en ese caso se pierden logs de exito y solo quedan warnings/errores.
+
+Para este proyecto MVP se recomienda la opcion 1, porque permite mantener evidencia de negocio sin ingerir todos los logs informativos.
 
 ## Estado actual relevante
 
@@ -74,6 +93,8 @@ Archivos clave:
 - `app.py`: Streamlit.
 - `utils/api_client.py`: cliente hacia `INGEST_API_URL`, `PROCESS_API_URL`, `RAG_API_URL`.
 - `Dockerfile`: arranca Streamlit con `--logger.level=info`.
+
+Para coste minimo, se recomienda revisar ese nivel del frontend y usar `warning` en Azure si no se necesitan logs informativos de Streamlit.
 
 Para el MVP, el frontend se monitoriza principalmente con:
 
@@ -168,7 +189,8 @@ Campos contextuales cuando aplique:
 ### Implementacion recomendada
 
 1. Mantener `ConsoleRenderer` solo si `APP_ENV=local`.
-2. Usar `JSONRenderer` para Azure:
+2. Definir nivel custom `SUCCESS=25` si se quieren conservar exitos finales sin habilitar `INFO`.
+3. Usar `JSONRenderer` para Azure:
 
 ```python
 renderer = (
@@ -178,7 +200,7 @@ renderer = (
 )
 ```
 
-3. Anadir un processor para incluir `app_env`:
+4. Anadir un processor para incluir `app_env`:
 
 ```python
 def _add_app_env(app_env: str):
@@ -188,20 +210,22 @@ def _add_app_env(app_env: str):
     return processor
 ```
 
-4. Mantener `_add_service_name(service_name)`.
-5. Cambiar el ultimo processor por `renderer`.
+5. Mantener `_add_service_name(service_name)`.
+6. Cambiar el ultimo processor por `renderer`.
+7. En Azure configurar `LOG_LEVEL=SUCCESS` o, si se quiere maximo ahorro, `LOG_LEVEL=WARNING`.
 
 ### Criterio de aceptacion
 
-Un log como `blob_uploaded` debe verse en Log Analytics como JSON parseable:
+Un log como `document_upload_completed` debe verse en Log Analytics como JSON parseable:
 
 ```json
 {
-  "event": "blob_uploaded",
+  "event": "document_upload_completed",
   "service": "ingest-service",
-  "level": "info",
+  "level": "success",
   "doc_id": "...",
-  "blob": "...",
+  "file_name": "...",
+  "duration_ms": 1234,
   "app_env": "development"
 }
 ```
@@ -210,7 +234,7 @@ Un log como `blob_uploaded` debe verse en Log Analytics como JSON parseable:
 
 ### Objetivo
 
-Medir latencia y resultado HTTP de cada endpoint sin instalar OpenTelemetry.
+Medir latencia y resultado HTTP sin generar un log por cada request normal.
 
 ### Cambio minimo
 
@@ -219,7 +243,10 @@ Crear `app/shared/request_logging.py` con un middleware ASGI/FastAPI que:
 - Lee `X-Request-ID` si llega.
 - Si no llega, genera un UUID.
 - Mide duracion de la request.
-- Registra un unico evento `http_request_completed`.
+- Registra solo requests relevantes para coste minimo:
+  - `http_request_failed` en respuestas 5xx o excepciones.
+  - `http_request_warning` en respuestas 4xx.
+  - `http_request_slow` si supera un umbral, por ejemplo 3s en `/upload` o 10s en `/search`.
 - Devuelve `X-Request-ID` en la respuesta.
 
 Campos del evento:
@@ -258,15 +285,38 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
-            logger.info(
-                "http_request_completed",
-                request_id=request_id,
-                method=request.method,
-                path=request.url.path,
-                status_code=status_code,
-                duration_ms=duration_ms,
-                client_host=request.client.host if request.client else None,
-            )
+            path = request.url.path
+            is_slow = duration_ms >= 10000 or (path.startswith("/upload") and duration_ms >= 3000)
+            if status_code >= 500:
+                logger.error(
+                    "http_request_failed",
+                    request_id=request_id,
+                    method=request.method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=duration_ms,
+                    client_host=request.client.host if request.client else None,
+                )
+            elif status_code >= 400:
+                logger.warning(
+                    "http_request_warning",
+                    request_id=request_id,
+                    method=request.method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=duration_ms,
+                    client_host=request.client.host if request.client else None,
+                )
+            elif is_slow:
+                logger.warning(
+                    "http_request_slow",
+                    request_id=request_id,
+                    method=request.method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=duration_ms,
+                    client_host=request.client.host if request.client else None,
+                )
             if "response" in locals():
                 response.headers["X-Request-ID"] = request_id
 ```
@@ -285,7 +335,7 @@ app.add_middleware(RequestLoggingMiddleware)
 
 ### Criterio de aceptacion
 
-Cada llamada a `/health`, `/upload`, `/processing/{doc_id}` y `/search` genera un evento `http_request_completed` con `duration_ms`.
+Las requests normales a `/health` no generan logs en Azure. Las requests lentas, 4xx y 5xx generan eventos con `duration_ms`.
 
 ## Fase 4 - Eventos imprescindibles del flujo RAG
 
@@ -299,75 +349,65 @@ Tener una linea temporal suficiente para seguir un CV desde subida hasta busqued
 
 Eventos necesarios:
 
-- `document_upload_accepted`
+- `document_upload_completed`
 - `rejected_file`
-- `blob_uploaded`
-- `processing_triggered`
 - `upload_failed`
 - `processing_trigger_failed`
 
 Acciones:
 
-1. En `accept_uploads`, anadir `document_upload_accepted` cuando se acepta cada PDF.
-2. Incluir:
+1. No registrar cada aceptacion como `INFO`.
+2. Registrar `document_upload_completed` como `SUCCESS` cuando el PDF queda subido a Blob y processing ha sido disparado correctamente.
+3. Incluir:
    - `doc_id`
    - `file_name`
-   - `content_type`
    - `file_size_bytes`
-3. Mantener `rejected_file` para no-PDF.
-4. En `_process_upload`, mantener `blob_uploaded`.
-5. En `_trigger_processing`, mantener `processing_triggered` y `processing_trigger_failed`.
+   - `duration_ms`
+4. Mantener `rejected_file` como `WARNING` para no-PDF.
+5. Mantener `upload_failed` y `processing_trigger_failed` como `ERROR`.
 6. En errores, anadir `error_type=type(exc).__name__`.
+7. No es necesario emitir `blob_uploaded` y `processing_triggered` como eventos separados en Azure si ya existe `document_upload_completed`.
 
 #### Processing service
 
 Eventos necesarios:
 
-- `indexing_started`
-- `metadata_extracted`
-- `chunks_generated`
-- `embeddings_generated`
-- `qdrant_upsert_completed`
 - `indexing_completed`
+- `indexing_degraded`
 - `indexing_failed`
 
 Acciones:
 
-1. Mantener `indexing_started`, `metadata_extracted`, `chunks_generated`, `indexing_completed`.
-2. Anadir `embeddings_generated` tras generar embeddings:
+1. No registrar `indexing_started`, `metadata_extracted`, `chunks_generated` ni `embeddings_generated` como logs normales en Azure.
+2. Registrar `indexing_completed` como `SUCCESS` al final del flujo:
    - `doc_id`
    - `n_chunks`
    - `embedding_count`
-   - `use_fake_integrations`
-3. Anadir `qdrant_upsert_completed` tras upsert correcto:
-   - `doc_id`
-   - `points`
-   - `collection`
-4. En `process_document`, envolver el flujo completo para loggear `indexing_failed` antes de propagar excepcion.
+   - `qdrant_points`
+   - `duration_ms`
+3. Registrar `indexing_degraded` como `WARNING` si faltan metadatos esperados, si Qdrant esta vacio/cargando o si una dependencia tarda demasiado pero el flujo no falla.
+4. Registrar `indexing_failed` como `ERROR` antes de propagar excepcion.
 5. No loggear texto del CV ni respuesta completa del LLM.
 
 #### RAG service
 
 Eventos necesarios:
 
-- `rag_search_started`
-- `qdrant_search_attempt`
-- `qdrant_search_result`
-- `llm_extraction_failed`
 - `rag_search_completed`
+- `rag_search_degraded`
 - `rag_search_failed`
 
 Acciones:
 
-1. En `search_candidates`, registrar `rag_search_started` con:
+1. No registrar `rag_search_started`, `qdrant_search_attempt` ni `qdrant_search_result` en Azure por defecto.
+2. Registrar `rag_search_completed` como `SUCCESS` con:
    - `top_k`
    - `min_exp_years`
    - `has_location_filter`
-2. Mantener `qdrant_search_attempt` y `qdrant_search_result`.
-3. Anadir `rag_search_completed` con:
    - `results_count`
    - `duration_ms`
-4. En excepciones, loggear `rag_search_failed` con:
+3. Registrar `rag_search_degraded` como `WARNING` si Qdrant esta cargando, no hay resultados inesperadamente o falla la extraccion LLM pero hay fallback.
+4. En excepciones, loggear `rag_search_failed` como `ERROR` con:
    - `error`
    - `error_type`
 5. No loggear `job_description` completo. Como maximo, `query_length`.
@@ -381,7 +421,8 @@ ContainerAppConsoleLogs_CL
 | where TimeGenerated > ago(24h)
 | extend log=parse_json(Log_s)
 | where tostring(log.doc_id) == "<doc_id>"
-| project TimeGenerated, service=tostring(log.service), event=tostring(log.event), duration_ms=todouble(log.duration_ms), Log_s
+| where tostring(log.level) in ("success", "warning", "error")
+| project TimeGenerated, service=tostring(log.service), level=tostring(log.level), event=tostring(log.event), duration_ms=todouble(log.duration_ms), Log_s
 | order by TimeGenerated asc
 ```
 
@@ -477,7 +518,7 @@ ContainerAppConsoleLogs_CL
 ContainerAppConsoleLogs_CL
 | where TimeGenerated > ago(24h)
 | extend log=parse_json(Log_s)
-| where tostring(log.event) == "http_request_completed"
+| where tostring(log.event) in ("http_request_failed", "http_request_warning", "http_request_slow")
 | summarize
     requests=count(),
     avg_ms=avg(todouble(log.duration_ms)),
@@ -494,10 +535,12 @@ ContainerAppConsoleLogs_CL
 | where TimeGenerated > ago(24h)
 | extend log=parse_json(Log_s)
 | where tostring(log.doc_id) == "<doc_id>"
+| where tostring(log.level) in ("success", "warning", "error")
 | project
     TimeGenerated,
     app=ContainerAppName_s,
     service=tostring(log.service),
+    level=tostring(log.level),
     event=tostring(log.event),
     duration_ms=todouble(log.duration_ms),
     raw=Log_s
@@ -511,7 +554,7 @@ ContainerAppConsoleLogs_CL
 | where TimeGenerated > ago(24h)
 | extend log=parse_json(Log_s)
 | where tostring(log.event) in (
-    "document_upload_accepted",
+    "document_upload_completed",
     "indexing_completed",
     "rag_search_completed",
     "upload_failed",
@@ -571,7 +614,7 @@ Query:
 ContainerAppConsoleLogs_CL
 | where TimeGenerated > ago(10m)
 | extend log=parse_json(Log_s)
-| where tostring(log.event) == "http_request_completed"
+| where tostring(log.event) == "http_request_failed"
 | summarize errors=countif(toint(log.status_code) >= 500) by service=tostring(log.service)
 | where errors >= 3
 ```
@@ -636,7 +679,8 @@ Demostrar que la observabilidad MVP cubre el flujo principal.
 
 1. Abrir frontend.
 2. Llamar `/health` de los tres backends.
-3. Validar `http_request_completed`.
+3. Confirmar que no se generan logs de exito para health normales.
+4. Validar que un 4xx/5xx o una request lenta si genera log.
 
 Evidencia:
 
@@ -653,25 +697,15 @@ ContainerAppConsoleLogs_CL
 1. Subir un CV PDF desde frontend.
 2. Guardar `doc_id`.
 3. Validar eventos:
-   - `document_upload_accepted`
-   - `blob_uploaded`
-   - `processing_triggered`
-   - `indexing_started`
-   - `metadata_extracted`
-   - `chunks_generated`
-   - `embeddings_generated`
-   - `qdrant_upsert_completed`
+   - `document_upload_completed`
    - `indexing_completed`
 
 ### Caso 3 - Busqueda RAG
 
 1. Ejecutar busqueda desde frontend.
 2. Validar eventos:
-   - `rag_search_started`
-   - `qdrant_search_attempt`
-   - `qdrant_search_result`
    - `rag_search_completed`
-3. Validar latencia en `http_request_completed` para `/search`.
+3. Validar `duration_ms` en `rag_search_completed`.
 
 ### Caso 4 - Fallo controlado
 
@@ -693,9 +727,9 @@ Validar que aparece al menos uno:
 ## Orden recomendado de implementacion
 
 1. Conectar Container Apps Environment a Log Analytics.
-2. Cambiar backend a JSON logs en Azure.
-3. Anadir middleware `http_request_completed`.
-4. Completar eventos MVP que falten en ingest, processing y rag.
+2. Cambiar backend a JSON logs en Azure con nivel `SUCCESS` o `WARNING`.
+3. Anadir middleware solo para requests lentas, warnings y errores.
+4. Completar eventos MVP de exito final, warning y error.
 5. Crear `docs/kql/mvp-observability.kql`.
 6. Crear 3 o 4 alertas minimas.
 7. Ejecutar validacion end-to-end y guardar evidencias.
@@ -752,9 +786,11 @@ Archivos previstos:
 Checklist:
 
 - [ ] Cambiar `structlog` para emitir JSON en Azure y consola legible solo en local.
+- [ ] Definir `SUCCESS=25` si se quieren conservar exitos finales sin habilitar `INFO`.
+- [ ] Configurar Azure con `LOG_LEVEL=SUCCESS` o `LOG_LEVEL=WARNING`.
 - [ ] Anadir `app_env` y `service` a todos los logs.
 - [ ] Crear middleware `RequestLoggingMiddleware`.
-- [ ] Registrar evento `http_request_completed`.
+- [ ] Registrar solo `http_request_failed`, `http_request_warning` y `http_request_slow`.
 - [ ] Incluir en ese evento:
   - `request_id`;
   - `method`;
@@ -764,11 +800,12 @@ Checklist:
   - `client_host`.
 - [ ] Propagar `X-Request-ID` en la respuesta.
 - [ ] Registrar el middleware en los tres `main.py`.
-- [ ] Probar localmente `/health` en los tres servicios y comprobar que se emite `http_request_completed`.
+- [ ] Probar localmente `/health` en los tres servicios y comprobar que no emite logs normales de exito.
+- [ ] Probar un 4xx/5xx o request lenta y comprobar que si se emite log.
 
 Criterio de cierre:
 
-- Cualquier request backend genera un log JSON parseable con latencia y codigo HTTP.
+- Las requests lentas, 4xx y 5xx generan un log JSON parseable con latencia y codigo HTTP. Las requests normales no generan log.
 
 ### Integrante 3 - Eventos MVP del flujo backend
 
@@ -783,26 +820,21 @@ Archivos previstos:
 
 Checklist:
 
-- [ ] En ingesta, asegurar `document_upload_accepted` con:
+- [ ] En ingesta, asegurar `document_upload_completed` como exito final con:
   - `doc_id`;
   - `file_name`;
-  - `content_type`;
-  - `file_size_bytes`.
-- [ ] Mantener y revisar `rejected_file`, `blob_uploaded`, `processing_triggered`, `upload_failed`, `processing_trigger_failed`.
+  - `file_size_bytes`;
+  - `duration_ms`.
+- [ ] No emitir `document_upload_accepted`, `blob_uploaded` ni `processing_triggered` como logs normales en Azure.
+- [ ] Mantener y revisar `rejected_file`, `upload_failed`, `processing_trigger_failed`.
 - [ ] Anadir `error_type` en errores de ingesta.
 - [ ] En procesamiento, asegurar:
-  - `indexing_started`;
-  - `metadata_extracted`;
-  - `chunks_generated`;
-  - `embeddings_generated`;
-  - `qdrant_upsert_completed`;
   - `indexing_completed`;
+  - `indexing_degraded`;
   - `indexing_failed`.
 - [ ] En RAG, asegurar:
-  - `rag_search_started`;
-  - `qdrant_search_attempt`;
-  - `qdrant_search_result`;
   - `rag_search_completed`;
+  - `rag_search_degraded`;
   - `rag_search_failed`.
 - [ ] No registrar texto completo del CV, prompts completos ni respuestas completas del LLM.
 - [ ] Medir `duration_ms` en indexacion completa y busqueda RAG completa.
@@ -869,9 +901,10 @@ La observabilidad MVP queda cerrada cuando:
 
 - `ContainerAppConsoleLogs_CL` recibe logs de frontend, ingest, processing y rag.
 - Los logs backend son JSON parseable.
-- Cada request backend registra `http_request_completed` con `duration_ms` y `status_code`.
+- No se emiten logs `INFO` en Azure.
+- Las requests normales no generan logs; solo requests lentas, warnings y errores.
 - Un `doc_id` permite seguir upload, procesamiento e indexacion.
-- Una busqueda permite ver intento Qdrant, resultados y finalizacion.
+- Una busqueda permite ver finalizacion exitosa o fallo/degradacion.
 - Existen KQL guardadas para errores, latencia, KPIs y fallos Qdrant/OpenAI.
 - Hay alertas para 5xx, fallo de indexacion, fallo de busqueda y reinicios.
 - La validacion end-to-end tiene evidencia de un caso correcto y un fallo controlado.
