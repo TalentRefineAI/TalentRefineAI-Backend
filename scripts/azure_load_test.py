@@ -2,23 +2,24 @@
 """
 azure_load_test.py - Script de desgaste para analisis de costes en Azure Container Apps.
 
-Simula el uso real de TalentRefineAI contra los servicios desplegados:
+Simula el uso real de TalentRefineAI contra el ingest-service desplegado:
   - Upload de CVs ficticios        (POST /upload)
   - Polling de estado              (GET  /upload/{id}/status)
-  - Busqueda RAG                   (POST /search)
-  - Listado de candidatos          (GET  /search/candidates)
+
+Nota: el rag-service tiene URL .internal. (solo accesible desde dentro del entorno
+de Container Apps). Los costes RAG se incluyen como proyeccion teorica basada en
+el volumen de busquedas diarias estimado.
 
 Genera tres ficheros CSV y un informe Markdown con metricas de latencia
 y estimacion de costes Azure OpenAI + Blob Storage + Container Apps.
 
 Uso:
-    python scripts/azure_load_test.py \\
-        --ingest-url https://ingest-service.xxx.azurecontainerapps.io \\
-        --rag-url    https://rag-service.xxx.azurecontainerapps.io    \\
-        --duration   300                                               \\
-        --concurrent-users 3                                           \\
-        --pdfs-per-user    5                                           \\
-        --searches-per-user 10                                         \\
+    python scripts/azure_load_test.py \
+        --ingest-url https://ca-ingesta-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io \
+        --duration   300                                               \
+        --concurrent-users 3                                           \
+        --pdfs-per-user    5                                           \
+        --estimated-daily-searches 50                                  \
         --output-dir ./load_test_results
 """
 from __future__ import annotations
@@ -64,16 +65,17 @@ _CHUNK_TOKENS = 1024
 _GPT_METADATA_IN_PER_PDF = 950
 _GPT_METADATA_OUT_PER_PDF = 200
 
-# rag-service: _search_azure → 1 embedding por query
+# rag-service: _search_azure → 1 embedding por query (proyeccion teorica)
 _QUERY_EMBED_TOKENS = 55
 
 # rag-service: _extract_all_candidates → 1 llamada LLM con top_k candidatos
-# top_k=5, cada candidato tiene ~3 chunks × 400 tokens = 6000 tokens de contexto
+# top_k=5, cada candidato tiene ~3 chunks × 400 tokens de contexto
 # + prompt sistema ~600 tokens + descripcion puesto ~100 tokens
 _GPT_SEARCH_IN_BASE = 700           # sistema + job_description
 _GPT_SEARCH_IN_PER_CANDIDATE = 1200  # chunks de contexto por candidato
 # JSON output: por candidato ~280 tokens (summary + justification + otros campos)
 _GPT_SEARCH_OUT_PER_CANDIDATE = 280
+_GPT_SEARCH_TOP_K = 5               # top_k por defecto en el rag-service
 
 # ── Perfiles de CV ficticios ──────────────────────────────────────────────────
 _CV_TEMPLATES: list[dict[str, Any]] = [
@@ -318,7 +320,7 @@ class CostEstimate:
     # Contexto del test
     test_duration_seconds: float
     total_uploads: int
-    total_searches: int
+    estimated_daily_searches: int      # proyeccion teorica, no medida en tiempo real
 
 
 # ── Generacion de PDFs ficticios ──────────────────────────────────────────────
@@ -487,108 +489,24 @@ async def op_poll_status(
     )
 
 
-async def op_search(
-    client: httpx.AsyncClient,
-    rag_url: str,
-    job_description: str,
-    user_id: int,
-    top_k: int = 5,
-) -> OperationRecord:
-    """Realiza una busqueda RAG en POST /search y registra latencia y resultados."""
-    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    t0 = time.perf_counter()
-    status_code = 0
-    error = ""
-    success = False
-    results_count = 0
-
-    try:
-        resp = await client.post(
-            f"{rag_url}/search",
-            json={"job_description": job_description, "top_k": top_k},
-        )
-        status_code = resp.status_code
-        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-        if status_code == 200:
-            results_count = len(resp.json().get("results") or [])
-            success = True
-        else:
-            error = resp.text[:300]
-    except Exception as exc:
-        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-        error = str(exc)[:300]
-
-    return OperationRecord(
-        timestamp=ts,
-        user_id=user_id,
-        operation="search",
-        status_code=status_code,
-        latency_ms=latency_ms,
-        success=success,
-        error=error,
-        doc_id="",
-        extra=json.dumps({"top_k": top_k, "results_returned": results_count}),
-    )
-
-
-async def op_list_candidates(
-    client: httpx.AsyncClient,
-    rag_url: str,
-    user_id: int,
-) -> OperationRecord:
-    """Llama a GET /search/candidates y registra el total de candidatos devueltos."""
-    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    t0 = time.perf_counter()
-    status_code = 0
-    error = ""
-    success = False
-    total = 0
-
-    try:
-        resp = await client.get(f"{rag_url}/search/candidates")
-        status_code = resp.status_code
-        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-        if status_code == 200:
-            total = resp.json().get("total", 0)
-            success = True
-        else:
-            error = resp.text[:300]
-    except Exception as exc:
-        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-        error = str(exc)[:300]
-
-    return OperationRecord(
-        timestamp=ts,
-        user_id=user_id,
-        operation="list_candidates",
-        status_code=status_code,
-        latency_ms=latency_ms,
-        success=success,
-        error=error,
-        doc_id="",
-        extra=json.dumps({"total_candidates": total}),
-    )
-
-
 # ── Simulacion de usuario ──────────────────────────────────────────────────────
 
 async def simulate_user(
     user_id: int,
     ingest_url: str,
-    rag_url: str,
     pdfs_per_user: int,
-    searches_per_user: int,
     semaphore: asyncio.Semaphore,
 ) -> list[OperationRecord]:
     """
-    Simula el flujo completo de un reclutador: sube CVs, espera su procesamiento
-    y luego realiza busquedas RAG intercaladas con listados de candidatos.
+    Simula el flujo de un reclutador contra el ingest-service (unico endpoint publico):
+    sube CVs ficticios y hace polling hasta que el processing-service los completa.
+    El rag-service es .internal. y solo es accesible desde dentro del entorno de
+    Container Apps (el frontend lo llama directamente desde alli).
     """
     records: list[OperationRecord] = []
     timeout = httpx.Timeout(180.0, connect=30.0)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        # Fase 1: upload + polling de cada CV
         pool = _CV_TEMPLATES.copy()
         random.shuffle(pool)
         candidates = pool[:pdfs_per_user] if pdfs_per_user <= len(pool) else (
@@ -604,26 +522,6 @@ async def simulate_user(
                 async with semaphore:
                     poll_rec = await op_poll_status(client, ingest_url, rec.doc_id, user_id)
                 records.append(poll_rec)
-
-            await asyncio.sleep(random.uniform(0.5, 2.0))
-
-        # Fase 2: busquedas RAG con listados intercalados cada 3 busquedas
-        job_pool = _JOB_DESCRIPTIONS.copy()
-        random.shuffle(job_pool)
-        if searches_per_user <= len(job_pool):
-            job_descs = job_pool[:searches_per_user]
-        else:
-            job_descs = job_pool + random.choices(job_pool, k=searches_per_user - len(job_pool))
-
-        for i, job_desc in enumerate(job_descs):
-            async with semaphore:
-                rec = await op_search(client, rag_url, job_desc, user_id)
-            records.append(rec)
-
-            if (i + 1) % 3 == 0:
-                async with semaphore:
-                    list_rec = await op_list_candidates(client, rag_url, user_id)
-                records.append(list_rec)
 
             await asyncio.sleep(random.uniform(0.5, 2.0))
 
@@ -668,39 +566,46 @@ def aggregate_metrics(records: list[OperationRecord]) -> list[AggregatedMetrics]
     return result
 
 
-def calculate_costs(records: list[OperationRecord], test_duration_sec: float) -> CostEstimate:
+def calculate_costs(
+    records: list[OperationRecord],
+    test_duration_sec: float,
+    estimated_daily_searches: int,
+) -> CostEstimate:
     """
-    Estima el coste en USD basandose en las operaciones exitosas del test.
+    Estima el coste en USD basandose en las operaciones medidas (ingest) y en
+    la proyeccion teorica de busquedas diarias (rag-service, interno).
     El modelo de tokens refleja el flujo real del codigo:
       - processing-service: 1 llamada LLM para metadatos + N embeddings por chunk.
-      - rag-service: 1 embedding por query + 1 llamada LLM con todos los candidatos.
+      - rag-service: 1 embedding por query + 1 llamada LLM por busqueda (proyeccion).
     """
     uploads_ok = sum(1 for r in records if r.operation == "upload" and r.success)
-    searches_ok = sum(1 for r in records if r.operation == "search" and r.success)
+
+    # Escala las busquedas estimadas al periodo del test para que la comparacion
+    # con los uploads medidos sea coherente en la misma ventana de tiempo.
+    searches_projected = int(estimated_daily_searches * test_duration_sec / 86400)
 
     # Tokens de embedding:
-    #   - Procesamiento: AVG_CHUNKS_PER_PDF × CHUNK_TOKENS por PDF subido
-    #   - Busqueda: QUERY_EMBED_TOKENS por query RAG
+    #   - Procesamiento (medido): AVG_CHUNKS_PER_PDF × CHUNK_TOKENS por PDF subido
+    #   - Busqueda (proyectado): QUERY_EMBED_TOKENS por query RAG
     embed_tokens = (
         uploads_ok * _AVG_CHUNKS_PER_PDF * _CHUNK_TOKENS
-        + searches_ok * _QUERY_EMBED_TOKENS
+        + searches_projected * _QUERY_EMBED_TOKENS
     )
 
     # Tokens GPT input:
-    #   - Procesamiento: prompt metadata (~950 tokens) por PDF
-    #   - Busqueda: prompt base + top_k candidatos en contexto
-    top_k_default = 5
+    #   - Procesamiento (medido): prompt metadata (~950 tokens) por PDF
+    #   - Busqueda (proyectado): prompt base + top_k candidatos en contexto
     gpt_in_tokens = (
         uploads_ok * _GPT_METADATA_IN_PER_PDF
-        + searches_ok * (_GPT_SEARCH_IN_BASE + top_k_default * _GPT_SEARCH_IN_PER_CANDIDATE)
+        + searches_projected * (_GPT_SEARCH_IN_BASE + _GPT_SEARCH_TOP_K * _GPT_SEARCH_IN_PER_CANDIDATE)
     )
 
     # Tokens GPT output:
-    #   - Procesamiento: JSON de metadatos (~200 tokens) por PDF
-    #   - Busqueda: JSON con summary + justification por candidato
+    #   - Procesamiento (medido): JSON de metadatos (~200 tokens) por PDF
+    #   - Busqueda (proyectado): JSON con summary + justification por candidato
     gpt_out_tokens = (
         uploads_ok * _GPT_METADATA_OUT_PER_PDF
-        + searches_ok * top_k_default * _GPT_SEARCH_OUT_PER_CANDIDATE
+        + searches_projected * _GPT_SEARCH_TOP_K * _GPT_SEARCH_OUT_PER_CANDIDATE
     )
 
     # Blob Storage: 1 write por upload exitoso, 1 read por polling de estado
@@ -748,7 +653,7 @@ def calculate_costs(records: list[OperationRecord], test_duration_sec: float) ->
         monthly_extrapolation_usd=round(monthly, 4),
         test_duration_seconds=round(test_duration_sec, 2),
         total_uploads=uploads_ok,
-        total_searches=searches_ok,
+        estimated_daily_searches=estimated_daily_searches,
     )
 
 
@@ -819,12 +724,12 @@ def export_markdown(
         "| Parametro | Valor |",
         "|---|---|",
         f"| Ingest URL | `{config['ingest_url']}` |",
-        f"| RAG URL | `{config['rag_url']}` |",
+        "| RAG URL | `.internal.` (solo accesible desde dentro del entorno de Container Apps) |",
         f"| Duracion configurada | {config['duration']}s |",
         f"| Duracion real | {cost.test_duration_seconds}s |",
         f"| Usuarios concurrentes | {config['concurrent_users']} |",
         f"| PDFs por usuario | {config['pdfs_per_user']} |",
-        f"| Busquedas RAG por usuario | {config['searches_per_user']} |",
+        f"| Busquedas RAG diarias (proyeccion) | {config['estimated_daily_searches']} |",
         f"| Modelo embedding | text-embedding-3-small (configurado en el servicio) |",
         f"| Modelo chat | gpt-4o-mini (configurado en el servicio) |",
         "",
@@ -837,7 +742,7 @@ def export_markdown(
         f"| Operaciones fallidas | {total_ops - total_ok} |",
         f"| Tasa de exito global | {global_ok_pct}% |",
         f"| CVs subidos y procesados | {cost.total_uploads} |",
-        f"| Busquedas RAG completadas | {cost.total_searches} |",
+        f"| Busquedas RAG diarias (proyeccion) | {cost.estimated_daily_searches} |",
         "",
         "## 3. Metricas de latencia por operacion",
         "",
@@ -861,11 +766,13 @@ def export_markdown(
         "",
         "### 4.1 Consumo de tokens Azure OpenAI",
         "",
-        "> Modelo de estimacion basado en el flujo real del codigo:",
-        "> - **Processing**: 1 llamada LLM para extraccion de metadatos (~950 tokens input)",
-        f">   + {_AVG_CHUNKS_PER_PDF} embeddings × {_CHUNK_TOKENS} tokens/chunk por PDF.",
-        "> - **Search**: 1 embedding de query (~55 tokens) + 1 llamada LLM con los chunks",
-        ">   de los top-5 candidatos como contexto.",
+        "> Modelo de estimacion:",
+        "> - **Processing** (medido en el test): 1 llamada LLM para extraccion de metadatos (~950 tokens input)",
+        f">   + {_AVG_CHUNKS_PER_PDF} embeddings x {_CHUNK_TOKENS} tokens/chunk por PDF subido.",
+        "> - **Search RAG** (proyeccion teorica): el rag-service tiene URL .internal. y solo",
+        ">   es accesible desde dentro del entorno de Container Apps. Los costes se proyectan",
+        f">   a partir de {cost.estimated_daily_searches} busquedas/dia configuradas: 1 embedding (~55 tokens) + 1 llamada LLM",
+        f">   con top-{_GPT_SEARCH_TOP_K} candidatos en contexto por busqueda.",
         "",
         "| Concepto | Tokens estimados | Coste (USD) |",
         "|---|---|---|",
@@ -942,23 +849,20 @@ def export_markdown(
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
-async def check_services_health(ingest_url: str, rag_url: str) -> None:
-    """Verifica que ambos servicios esten accesibles antes de iniciar el test."""
-    checks = [
-        (f"{ingest_url}/health", "ingest-service"),
-        (f"{rag_url}/health", "rag-service"),
-    ]
+async def check_services_health(ingest_url: str) -> None:
+    """Verifica que el ingest-service (unico endpoint publico) este accesible."""
+    url = f"{ingest_url}/health"
     async with httpx.AsyncClient(timeout=15.0) as client:
-        for url, name in checks:
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    print(f"  [OK] {name} ({url})")
-                else:
-                    print(f"  [WARN] {name} respondio {resp.status_code} ({url})")
-            except Exception as exc:
-                print(f"  [ERROR] {name} no accesible: {exc}", file=sys.stderr)
-                sys.exit(1)
+        try:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                print(f"  [OK] ingest-service ({url})")
+            else:
+                print(f"  [WARN] ingest-service respondio {resp.status_code} ({url})")
+        except Exception as exc:
+            print(f"  [ERROR] ingest-service no accesible: {exc}", file=sys.stderr)
+            sys.exit(1)
+    print("  [INFO] rag-service (.internal.) no se verifica desde fuera del entorno")
 
 
 # ── Orquestador principal ─────────────────────────────────────────────────────
@@ -966,15 +870,15 @@ async def check_services_health(ingest_url: str, rag_url: str) -> None:
 async def run_load_test(config: dict[str, Any]) -> None:
     """Orquesta el test completo: health check, simulacion concurrente e informes."""
     print("Verificando accesibilidad de los servicios...")
-    await check_services_health(config["ingest_url"], config["rag_url"])
+    await check_services_health(config["ingest_url"])
     print()
 
     print(
         f"Iniciando test de carga en Azure\n"
-        f"  Duracion maxima : {config['duration']}s\n"
-        f"  Usuarios        : {config['concurrent_users']}\n"
-        f"  PDFs / usuario  : {config['pdfs_per_user']}\n"
-        f"  Busquedas / usr : {config['searches_per_user']}\n"
+        f"  Duracion maxima           : {config['duration']}s\n"
+        f"  Usuarios concurrentes     : {config['concurrent_users']}\n"
+        f"  PDFs / usuario            : {config['pdfs_per_user']}\n"
+        f"  Busquedas/dia (proyeccion): {config['estimated_daily_searches']}\n"
     )
 
     semaphore = asyncio.Semaphore(config["concurrent_users"])
@@ -985,9 +889,7 @@ async def run_load_test(config: dict[str, Any]) -> None:
             simulate_user(
                 user_id=i,
                 ingest_url=config["ingest_url"],
-                rag_url=config["rag_url"],
                 pdfs_per_user=config["pdfs_per_user"],
-                searches_per_user=config["searches_per_user"],
                 semaphore=semaphore,
             )
         )
@@ -1013,7 +915,7 @@ async def run_load_test(config: dict[str, Any]) -> None:
     print(f"Test completado en {test_duration:.1f}s | {len(records)} operaciones registradas.")
 
     metrics = aggregate_metrics(records)
-    cost = calculate_costs(records, test_duration)
+    cost = calculate_costs(records, test_duration, config["estimated_daily_searches"])
 
     ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     output_dir = Path(config["output_dir"])
@@ -1044,7 +946,7 @@ async def run_load_test(config: dict[str, Any]) -> None:
     print("ESTIMACION DE COSTES")
     print("=" * 65)
     print(f"  CVs procesados            : {cost.total_uploads}")
-    print(f"  Busquedas RAG             : {cost.total_searches}")
+    print(f"  Busquedas/dia (proyeccion): {cost.estimated_daily_searches}")
     print(f"  Tokens embedding          : {cost.embed_tokens_total:,}")
     print(f"  Tokens GPT (input)        : {cost.gpt_input_tokens_total:,}")
     print(f"  Tokens GPT (output)       : {cost.gpt_output_tokens_total:,}")
@@ -1069,11 +971,6 @@ def main() -> None:
         help="URL base del ingest-service en Azure Container Apps (sin barra final)",
     )
     parser.add_argument(
-        "--rag-url",
-        required=True,
-        help="URL base del rag-service en Azure Container Apps (sin barra final)",
-    )
-    parser.add_argument(
         "--duration",
         type=int,
         default=300,
@@ -1092,10 +989,10 @@ def main() -> None:
         help="CVs ficticios a subir y procesar por usuario",
     )
     parser.add_argument(
-        "--searches-per-user",
+        "--estimated-daily-searches",
         type=int,
-        default=10,
-        help="Busquedas RAG a realizar por usuario",
+        default=50,
+        help="Numero estimado de busquedas RAG diarias (proyeccion teorica de costes)",
     )
     parser.add_argument(
         "--output-dir",
@@ -1106,11 +1003,10 @@ def main() -> None:
     args = parser.parse_args()
     config: dict[str, Any] = {
         "ingest_url": args.ingest_url.rstrip("/"),
-        "rag_url": args.rag_url.rstrip("/"),
         "duration": args.duration,
         "concurrent_users": args.concurrent_users,
         "pdfs_per_user": args.pdfs_per_user,
-        "searches_per_user": args.searches_per_user,
+        "estimated_daily_searches": args.estimated_daily_searches,
         "output_dir": args.output_dir,
     }
 
