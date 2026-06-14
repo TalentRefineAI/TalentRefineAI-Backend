@@ -1,0 +1,120 @@
+// =========================================================================
+// 1. LOGS RECIENTES POR SERVICIO
+// Muestra las trazas generales ordenadas de más nuevas a más antiguas.
+// =========================================================================
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(1h)
+| extend log=parse_json(Log_s)
+| project
+    TimeGenerated,
+    app=ContainerAppName_s,
+    service=tostring(log.service),
+    level=tostring(log.level),
+    event=tostring(log.event),
+    message=Log_s
+| order by TimeGenerated desc
+| take 100;
+
+// =========================================================================
+// 2. ERRORES EN EL BACKEND
+// Filtra fallos críticos, excepciones y palabras clave de error.
+// =========================================================================
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(24h)
+| extend log=parse_json(Log_s)
+| where tostring(log.level) in ("error", "exception")
+   or tostring(log.event) has "failed"
+   or Log_s has_any ("Traceback", "Exception", "error")
+| project
+    TimeGenerated,
+    app=ContainerAppName_s,
+    service=tostring(log.service),
+    event=tostring(log.event),
+    error=tostring(log.error),
+    error_type=tostring(log.error_type),
+    raw=Log_s
+| order by TimeGenerated desc;
+
+// =========================================================================
+// 3. LATENCIA Y RENDIMIENTO POR ENDPOINT
+// Mide cuánto tardan los servicios y calcula medias y percentiles.
+// =========================================================================
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(24h)
+| extend log=parse_json(Log_s)
+| where tostring(log.event) in ("http_request_failed", "http_request_warning", "http_request_slow")
+| summarize
+    requests=count(),
+    avg_ms=avg(todouble(log.duration_ms)),
+    p95_ms=percentile(todouble(log.duration_ms), 95),
+    errors=countif(toint(log.status_code) >= 500)
+  by service=tostring(log.service), path=tostring(log.path), bin(TimeGenerated, 15m)
+| order by TimeGenerated desc;
+
+// =========================================================================
+// 4. TRAZABILIDAD DEL FLUJO DE UN DOCUMENTO (MÁS IMPORTANTE)
+// Sustituye <doc_id> por el UUID de un currículum para ver toda su vida.
+// =========================================================================
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(24h)
+| extend log=parse_json(Log_s)
+| where tostring(log.doc_id) == "<doc_id>"
+| where tostring(log.level) in ("success", "warning", "error")
+| project
+    TimeGenerated,
+    app=ContainerAppName_s,
+    service=tostring(log.service),
+    level=tostring(log.level),
+    event=tostring(log.event),
+    duration_ms=todouble(log.duration_ms),
+    raw=Log_s
+| order by TimeGenerated asc;
+
+// =========================================================================
+// 5. METRICAS Y RECUENTOS (KPIs MVP)
+// Muestra el número total de éxitos y fallos acumulados por hora.
+// =========================================================================
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(24h)
+| extend log=parse_json(Log_s)
+| where tostring(log.event) in (
+    "document_upload_completed",
+    "indexing_completed",
+    "rag_search_completed",
+    "upload_failed",
+    "indexing_failed",
+    "rag_search_failed"
+)
+| summarize count() by event=tostring(log.event), bin(TimeGenerated, 1h)
+| order by TimeGenerated desc;
+
+// =========================================================================
+// 6. CAÍDAS O PROBLEMAS EN BASE VECTORIAL QDRANT
+// =========================================================================
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(24h)
+| extend log=parse_json(Log_s)
+| where tostring(log.event) has "qdrant"
+| where tostring(log.level) in ("error", "warning") or tostring(log.event) has "failed"
+| project TimeGenerated, service=tostring(log.service), event=tostring(log.event), raw=Log_s
+| order by TimeGenerated desc;
+
+// =========================================================================
+// 7. ALERTAS Y CUELGUES DE CONEXIÓN CON AZURE OPENAI (LLM)
+// =========================================================================
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(24h)
+| extend log=parse_json(Log_s)
+| where Log_s has_any ("OpenAI", "embedding", "LLM", "llm", "429", "Timeout")
+| project TimeGenerated, app=ContainerAppName_s, service=tostring(log.service), event=tostring(log.event), raw=Log_s
+| order by TimeGenerated desc;
+
+// =========================================================================
+// 8. REINICIOS ANÓMALOS DE CONTENEDORES EN AZURE
+// Revisa si la infraestructura de Container Apps ha tumbado algún contenedor.
+// =========================================================================
+ContainerAppSystemLogs_CL
+| where TimeGenerated > ago(24h)
+| where Log_s has_any ("Restart", "BackOff", "Killing", "Failed", "Unhealthy")
+| project TimeGenerated, ContainerAppName_s, Reason_s, Log_s
+| order by TimeGenerated desc;
