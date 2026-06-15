@@ -19,7 +19,7 @@
   - `rag-service`: resuelve consultas:
     1. Embedding de la query con Azure OpenAI
     2. Prefiltrado por metadatos en Qdrant
-    3. Búsqueda vectorial
+    3. Búsqueda vectorial  
     4. Construcción de prompt y llamada a GPT‑4
     5. Respuesta justificada al frontend.
 - Orquestación RAG implementada con **LlamaIndex**; NO usar CrewAI salvo que el alcance cambie.

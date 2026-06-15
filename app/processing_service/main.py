@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from shared.logging import configure_logging
+from shared.request_logging import RequestLoggingMiddleware
 
 from .routers import processing
 
@@ -27,6 +28,8 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    app.add_middleware(RequestLoggingMiddleware)
 
     # Este servicio es interno; no expone CORS al exterior
 

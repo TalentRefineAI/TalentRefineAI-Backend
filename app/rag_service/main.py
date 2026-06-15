@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from shared.config import get_settings
 from shared.logging import configure_logging
+from shared.request_logging import RequestLoggingMiddleware
 
 from .routers import search
 
@@ -32,6 +33,8 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    app.add_middleware(RequestLoggingMiddleware)
 
     # Permite peticiones desde el frontend Streamlit
     app.add_middleware(

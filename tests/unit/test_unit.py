@@ -11,6 +11,8 @@ os.environ["KEY_VAULT_URL"] = ""
 os.environ["BLOB_ACCOUNT_URL"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = ""
 os.environ["QDRANT_URL"] = "http://localhost:6333"
+os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"] = "text-embedding-3-small"
+os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"] = "gpt-4o-mini"
 
 import math
 import pytest
@@ -169,26 +171,27 @@ class TestRAGEngineInit:
         engine = RAGEngine()
         assert engine._use_fake is True
 
-    def test_build_metadata_filters_none_when_no_filters(self):
+    def test_build_qdrant_filters_none_when_no_filters(self):
+        """Verifica que la consulta sin filtros devuelva un filtro Qdrant vacío (None)."""
         from rag_service.services.rag_engine import RAGEngine
         from rag_service.routers.schemas import SearchRequest
         req = SearchRequest(job_description="Python engineer with FastAPI experience")
-        result = RAGEngine._build_metadata_filters(req)
+        result = RAGEngine._build_qdrant_filter(req)
         assert result is None
 
-    def test_build_metadata_filters_exp_years(self):
+    def test_build_qdrant_filters_exp_years(self):
+        """Verifica que la consulta con exp_years devuelva None porque se filtra post-LLM."""
         from rag_service.services.rag_engine import RAGEngine
         from rag_service.routers.schemas import SearchRequest
         req = SearchRequest(
             job_description="Python engineer with FastAPI experience",
             min_exp_years=5.0,
         )
-        filters = RAGEngine._build_metadata_filters(req)
-        assert filters is not None
-        assert len(filters.filters) == 1
-        assert filters.filters[0].key == "exp_years"
+        filters = RAGEngine._build_qdrant_filter(req)
+        assert filters is None
 
-    def test_build_metadata_filters_both(self):
+    def test_build_qdrant_filters_both(self):
+        """Verifica que la consulta con ubicación y exp_years devuelva None porque se filtran post-retrieval."""
         from rag_service.services.rag_engine import RAGEngine
         from rag_service.routers.schemas import SearchRequest
         req = SearchRequest(
@@ -196,9 +199,8 @@ class TestRAGEngineInit:
             min_exp_years=3.0,
             required_location="Madrid",
         )
-        filters = RAGEngine._build_metadata_filters(req)
-        assert filters is not None
-        assert len(filters.filters) == 2
+        filters = RAGEngine._build_qdrant_filter(req)
+        assert filters is None
 
     def test_payload_matches_filters_pass(self):
         from rag_service.services.rag_engine import RAGEngine
@@ -310,3 +312,39 @@ class TestListCandidatesLogic:
         fname = raw.split("/")[-1] if "/" in raw else raw
         name = fname.rsplit(".", 1)[0] if "." in fname else fname
         assert name == "simple_cv"
+
+
+# ── shared/logging.py & shared/request_logging.py ───────────────────────────
+
+class TestLoggingAndMiddleware:
+    """Clase para probar la configuración de logs y el middleware de registro de peticiones."""
+
+    def test_custom_success_level_is_registered(self):
+        """Verifica que el nivel de log personalizado SUCCESS esté correctamente registrado en logging."""
+        import logging
+        from shared.logging import configure_logging
+        configure_logging("test-service")
+        assert hasattr(logging, "SUCCESS")
+        assert logging.SUCCESS == 25
+        assert logging.getLevelName(25) == "SUCCESS"
+
+    @pytest.mark.asyncio
+    async def test_middleware_adds_request_id_header(self):
+        """Verifica que el middleware añade la cabecera X-Request-ID a la respuesta HTTP."""
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+        from shared.request_logging import RequestLoggingMiddleware
+
+        app = FastAPI()
+        app.add_middleware(RequestLoggingMiddleware)
+
+        @app.get("/test")
+        async def dummy_endpoint():
+            """Endpoint de prueba que retorna un mensaje sencillo."""
+            return {"message": "hello"}
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            response = await ac.get("/test")
+        
+        assert response.status_code == 200
+        assert "X-Request-ID" in response.headers
