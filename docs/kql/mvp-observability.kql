@@ -3,17 +3,16 @@
 // Muestra las trazas generales ordenadas de más nuevas a más antiguas.
 // =========================================================================
 ContainerAppConsoleLogs_CL
-| where TimeGenerated > ago(1h)
-| extend log=parse_json(Log_s)
-| project
-    TimeGenerated,
-    app=ContainerAppName_s,
-    service=tostring(log.service),
-    level=tostring(log.level),
-    event=tostring(log.event),
-    message=Log_s
+| where Log_s contains "logger"
+| extend log = parse_json(Log_s)
+| project TimeGenerated, ContainerName_s, RevisionName_s, 
+          level = tostring(log.level),
+          event = tostring(log.event),
+          logger = tostring(log.logger),
+          service = tostring(log.service),
+          message = tostring(log.message),
+          Log_s
 | order by TimeGenerated desc
-| take 100;
 
 // =========================================================================
 // 2. ERRORES EN EL BACKEND
