@@ -486,3 +486,57 @@ patrón scale-to-zero que ya motivó hacer **síncrono** el processing-service.
 > Mientras no se mitigue, la observabilidad MVP **detecta** el problema (ausencia de
 > `document_upload_completed`/`indexing_completed` para un `doc_id` con `202`), que es justamente lo que
 > permite diagnosticarlo en una demo o entrega.
+
+### 10.2 Incidente resuelto — `404 DeploymentNotFound` en metadatos (`indexing_degraded`)
+
+**Fecha:** 2026-06-16.
+
+**Síntoma:** al subir varios CVs, `processing-service` emite `indexing_degraded`
+(`reason=metadata_llm_failed`) con `error: Error code: 404 ... DeploymentNotFound`. Los CVs **se
+indexan igual** pero con metadatos solo-regex (sin nombre/ubicación/skills/exp del LLM); la búsqueda
+RAG muestra `name` vacío, `exp_years=0` y `location=null`.
+
+**Causa raíz (NO era el script ni carga/429):** al Container App de processing (`ca-proc`) le faltaba
+la variable `AZURE_OPENAI_CHAT_DEPLOYMENT`. El backend caía a su default `gpt-4o-mini`
+(`app/shared/config.py`), que **no existe** como deployment — el real en Azure OpenAI se llama
+`gpt-deployment`. Los embeddings funcionaban porque `AZURE_OPENAI_EMBEDDING_DEPLOYMENT=embedding-deployment`
+sí estaba puesto. `ca-rag` ya tenía la var correcta; solo `ca-proc` divergía.
+
+**Diagnóstico (read-only):**
+```bash
+# Deployments reales:
+az cognitiveservices account deployment list --name oai-talentrefine-dev-spc \
+  --resource-group rg-talentrefine-dev-spc \
+  --query "[].{deployment:name, model:properties.model.name}" -o table
+# → embedding-deployment / gpt-deployment   (NO 'gpt-4o-mini')
+
+# Env vars del Container App (comparar ca-proc vs ca-rag):
+az containerapp show --name ca-proc-talentrefine-dev-spc -g rg-talentrefine-dev-spc \
+  --query "properties.template.containers[0].env[?contains(name,'OPENAI')]" -o table
+```
+
+**Fix inmediato (aplicado, crea nueva revisión):**
+```bash
+az containerapp update --name ca-proc-talentrefine-dev-spc \
+  --resource-group rg-talentrefine-dev-spc \
+  --set-env-vars AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-deployment
+```
+
+**Fix persistente (PENDIENTE, Integrante 1):** añadir `AZURE_OPENAI_CHAT_DEPLOYMENT = "gpt-deployment"`
+al Container App de processing en Terraform (`TalentRefineAI-Infra`), espejo de `ca-rag`. Si no, el
+`az update` se revierte en el próximo `terraform apply`.
+
+**Reproceso de CVs degradados:** los blobs ya están en Storage; re-disparar processing es idempotente
+(el upsert por `candidate_id` sobrescribe). `ca-proc` y `ca-rag` tienen ingress externo:
+```bash
+PROC=https://ca-proc-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io
+curl -X POST -G "$PROC/processing/<doc_id>" --data-urlencode "blob_name=<doc_id>/<fichero>.pdf"
+```
+> ⚠️ **Gotcha al scriptar el reproceso en Windows/Git Bash:** `az ... -o tsv` emite líneas con CRLF y
+> `mapfile -t` conserva el `\r` final → el `blob_name` queda como `...pdf\r`, que al URL-encodearse es
+> `...pdf%0D` → Azure Storage responde `500 InvalidUri` ("The requested URI does not represent any
+> resource on the server"). Limpia el `\r`: `az ... -o tsv | tr -d '\r'`.
+
+**Verificación de cierre:** `GET /search/candidates` y `POST /search` deben devolver `name`, `email`,
+`exp_years` (>0 cuando aplica) y `location` poblados; `indexing_degraded`/`metadata_llm_failed` cae a 0
+para nuevas ingestas.
