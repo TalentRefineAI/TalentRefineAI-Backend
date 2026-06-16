@@ -338,7 +338,9 @@ class RAGEngine:
             items: list[dict] = json.loads(match.group())
             return {item["candidate_id"]: item for item in items if "candidate_id" in item}
         except Exception as exc:
-            logger.warning("llm_extraction_parse_failed", error=str(exc), response=response_text[:300])
+            # No se loggea el contenido de la respuesta (puede contener PII de candidatos);
+            # solo el error y la longitud, suficiente para diagnosticar un parse-fail.
+            logger.warning("llm_extraction_parse_failed", error=str(exc), response_length=len(response_text))
             return {}
 
     # ------------------------------------------------------------------ #
