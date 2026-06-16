@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any
 
 import structlog
@@ -18,6 +19,18 @@ from ..repositories.qdrant_repository import QdrantRepository
 from ..routers.schemas import CandidateResult, SearchRequest, SearchResponse
 
 logger = structlog.get_logger(__name__)
+
+
+def _log_success(log, event: str, **fields) -> None:
+    """Éxito final de negocio que debe sobrevivir a LOG_LEVEL=SUCCESS/WARNING en Azure.
+
+    PLACEHOLDER (dependencia Integrante 2): mientras shared/logging.py no registre el nivel
+    custom SUCCESS=25 ni exponga logger.success(), se emite a INFO. Cuando Integrante 2
+    aterrice el nivel, este helper usará logger.success() automáticamente. Se puede entonces
+    sustituir por la llamada directa log.success(event, **fields) y borrar este helper.
+    """
+    success = getattr(log, "success", None)
+    (success if callable(success) else log.info)(event, **fields)
 
 
 class RAGEngine:
@@ -37,9 +50,26 @@ class RAGEngine:
 
     async def search_candidates(self, request: SearchRequest) -> SearchResponse:
         """Punto de entrada: delega a Azure o a la implementacion fake."""
-        if self._use_fake:
-            return await self._search_fake(request)
-        return await self._search_azure(request)
+        start = time.perf_counter()
+        try:
+            if self._use_fake:
+                resp = await self._search_fake(request)
+            else:
+                resp = await self._search_azure(request)
+        except Exception as exc:
+            logger.error("rag_search_failed", error=str(exc), error_type=type(exc).__name__)
+            raise
+        # No se loggea job_description; solo metadatos de la consulta y del resultado.
+        _log_success(
+            logger,
+            "rag_search_completed",
+            top_k=request.top_k,
+            min_exp_years=request.min_exp_years,
+            has_location_filter=request.required_location is not None,
+            results_count=len(resp.results),
+            duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        )
+        return resp
 
     # ------------------------------------------------------------------ #
     # Implementacion Azure (Qdrant directo + OpenAI)                     #
@@ -89,6 +119,8 @@ class RAGEngine:
                 max_attempts=_max_attempts,
                 points_count=points_count,
             )
+            # Flujo no fallido pero degradado: se devuelve respuesta vacía sin 500.
+            logger.warning("rag_search_degraded", reason="qdrant_not_ready", points_count=points_count)
             return SearchResponse(results=[])
 
         # Generar embedding de la consulta directamente via Azure OpenAI
@@ -161,6 +193,8 @@ class RAGEngine:
             logger.info("llm_data_mapped", candidates_queried=len(_cid_list), candidates_with_llm_data=len(llm_data))
         except Exception as exc:
             logger.warning("llm_extraction_failed", error=str(exc))
+            # Degradado: sin datos del LLM, el ranking cae a solo-coseno (fallback).
+            logger.warning("rag_search_degraded", reason="llm_extraction_fallback")
             llm_data = {}
 
         # Score hibrido: 40% coseno normalizado + 60% relevance_score del LLM
