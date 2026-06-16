@@ -33,6 +33,9 @@ services:
     environment:
       DEV_MODE: ${DEV_MODE:-0}
       QDRANT_URL: http://qdrant:6333
+      # FQDN interno del processing-service en la red docker (escucha en :8000).
+      # Sin esto, el default localhost:8002 de config.py apunta al propio contenedor.
+      PROCESSING_SERVICE_URL: http://processing-service:8000
     # En dev se monta el código fuente para que los cambios se reflejen sin rebuild
     volumes:
       - ./app/ingest_service:/app/ingest_service
