@@ -83,7 +83,7 @@ class IndexingService:
                 if not clean.strip():
                     raise ProcessingError(f"PDF vacio: {blob_name}")
                 # Extrae metadatos estructurados UNA sola vez; se denormalizan en cada chunk
-                meta = await self._extract_metadata(clean)
+                meta = await self._extract_metadata(clean, log)
                 log.info(
                     "metadata_extracted",
                     has_email=bool(meta.get("email")),
@@ -176,11 +176,12 @@ class IndexingService:
             "qdrant_points": qdrant_points,
         }
 
-    async def _extract_metadata(self, text: str) -> dict[str, Any]:
+    async def _extract_metadata(self, text: str, log: Any) -> dict[str, Any]:
         """
         Extrae metadatos estructurados del CV una sola vez.
         Regex deterministas (email/telefono) + LLM para el resto de campos.
-        Nunca lanza: ante cualquier fallo del LLM devuelve lo obtenido por regex.
+        Nunca lanza: ante cualquier fallo del LLM devuelve lo obtenido por regex y
+        emite indexing_degraded (con doc_id bindeado en log) para dejar trazo.
         """
         # Refuerzo determinista: email y telefono por regex sobre el texto completo
         email_m = _EMAIL_RE.search(text)
@@ -228,10 +229,12 @@ class IndexingService:
                 raise ValueError("No JSON object found in LLM response")
             data = json.loads(match.group())
         except asyncio.TimeoutError:
-            logger.warning("metadata_llm_timeout", text_len=len(text_for_llm))
+            # Degradado: el CV se indexa con metadatos solo-regex; el LLM no respondió a tiempo.
+            log.warning("indexing_degraded", reason="metadata_llm_timeout", text_len=len(text_for_llm))
             return fallback
         except Exception as exc:
-            logger.warning("metadata_llm_extraction_failed", error=str(exc))
+            # Degradado: el LLM falló o devolvió JSON inválido; se usa el fallback regex.
+            log.warning("indexing_degraded", reason="metadata_llm_failed", error=str(exc))
             return fallback
 
         # El LLM tiene prioridad; el regex rellena email/phone si el LLM los dejo vacios
