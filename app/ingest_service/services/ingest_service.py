@@ -1,5 +1,6 @@
 """Lógica de negocio de ingesta – ingest-service."""
 import hashlib
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -15,6 +16,18 @@ from ..repositories.blob_repository import BlobRepository
 logger = structlog.get_logger(__name__)
 
 _ALLOWED_CONTENT_TYPES = {"application/pdf"}
+
+
+def _log_success(log, event: str, **fields) -> None:
+    """Éxito final de negocio que debe sobrevivir a LOG_LEVEL=SUCCESS/WARNING en Azure.
+
+    PLACEHOLDER (dependencia Integrante 2): mientras shared/logging.py no registre el nivel
+    custom SUCCESS=25 ni exponga logger.success(), se emite a INFO. Cuando Integrante 2
+    aterrice el nivel, este helper usará logger.success() automáticamente. Se puede entonces
+    sustituir por la llamada directa log.success(event, **fields) y borrar este helper.
+    """
+    success = getattr(log, "success", None)
+    (success if callable(success) else log.info)(event, **fields)
 
 
 class IngestService:
@@ -70,27 +83,50 @@ class IngestService:
 
     async def _process_upload(self, doc_id: uuid.UUID, content: bytes, filename: str) -> None:
         """Tarea de background: sube el PDF a Blob Storage y dispara el processing-service."""
+        start = time.perf_counter()
         record = self._status_store[doc_id]
         record.status = ProcessingStatus.PROCESSING
         record.updated_at = datetime.now(timezone.utc)
+        # La ruta en Blob incluye el doc_id para evitar colisiones de nombre
+        blob_name = f"{doc_id}/{filename}"
 
+        # Subida a Blob: los errores se atribuyen como upload_failed
         try:
-            # La ruta en Blob incluye el doc_id para evitar colisiones de nombre
-            blob_name = f"{doc_id}/{filename}"
             await self._blob.upload(blob_name, content, content_type="application/pdf")
-            logger.info("blob_uploaded", doc_id=str(doc_id), blob=blob_name)
-
-            # Notifica al processing-service para que procese el PDF subido
-            await self._trigger_processing(doc_id, blob_name)
-
-            record.status = ProcessingStatus.COMPLETED
         except Exception as exc:
             record.status = ProcessingStatus.FAILED
             record.error_detail = str(exc)
-            logger.error("upload_failed", doc_id=str(doc_id), error=str(exc))
-            raise StorageError(str(exc)) from exc
-        finally:
             record.updated_at = datetime.now(timezone.utc)
+            logger.error(
+                "upload_failed",
+                doc_id=str(doc_id),
+                blob=blob_name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise StorageError(str(exc)) from exc
+
+        # Disparo del processing-service: el evento de error (processing_trigger_failed)
+        # lo emite _trigger_processing; aquí solo actualizamos estado y propagamos.
+        try:
+            await self._trigger_processing(doc_id, blob_name)
+        except Exception as exc:
+            record.status = ProcessingStatus.FAILED
+            record.error_detail = str(exc)
+            record.updated_at = datetime.now(timezone.utc)
+            raise StorageError(str(exc)) from exc
+
+        record.status = ProcessingStatus.COMPLETED
+        record.updated_at = datetime.now(timezone.utc)
+        # Éxito final del flujo de ingesta: PDF en Blob + processing disparado correctamente.
+        _log_success(
+            logger,
+            "document_upload_completed",
+            doc_id=str(doc_id),
+            file_name=filename,
+            file_size_bytes=len(content),
+            duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        )
 
     async def _trigger_processing(self, doc_id: uuid.UUID, blob_name: str) -> None:
         """Llama al processing-service via HTTP usando la URL configurada en PROCESSING_SERVICE_URL."""
@@ -105,9 +141,13 @@ class IngestService:
                     timeout=150.0,
                 )
                 response.raise_for_status()
-                logger.info("processing_triggered", doc_id=str(doc_id), blob_name=blob_name)
             except httpx.HTTPError as exc:
-                logger.error("processing_trigger_failed", doc_id=str(doc_id), error=str(exc))
+                logger.error(
+                    "processing_trigger_failed",
+                    doc_id=str(doc_id),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
                 raise
 
     async def delete_all_documents(self) -> None:

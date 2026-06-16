@@ -60,10 +60,11 @@ class QdrantRepository:
         doc_id: uuid.UUID,
         nodes: list[BaseNode],
         doc_metadata: dict[str, Any],
-    ) -> None:
+    ) -> int:
         """
         Persiste los chunks como puntos en Qdrant.
         En modo fake genera embeddings deterministicos si el nodo no los tiene.
+        Devuelve el numero de puntos realmente upserted (0 si no hubo ninguno).
         """
         await self._ensure_collection()
         points: list[PointStruct] = []
@@ -107,3 +108,5 @@ class QdrantRepository:
             logger.info("qdrant_upserting", n_points=len(points))
             await self._client.upsert(collection_name=self._collection, points=points)
             logger.info("qdrant_upsert", collection=self._collection, points=len(points))
+
+        return len(points)

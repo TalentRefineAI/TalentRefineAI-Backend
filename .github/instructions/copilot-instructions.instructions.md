@@ -1,6 +1,7 @@
 # Instrucciones para IA – Backend TalentRefine AI
 
 ## Alcance de este repo
+
 - SOLO contiene la **Capa de Negocio (Backend)**.
 - Infraestructura (Terraform) y Frontend (Streamlit) viven en repos separados.
 - Aquí NO se definen recursos Azure ni UI, solo:
@@ -13,18 +14,21 @@
   y no proponer código aquí.
 
 ## Arquitectura esperada (según Capítulo 4)
+
 - Microservicios FastAPI:
   - `ingest-service`: recibe PDFs, valida, sube a Blob y encola procesamiento.
   - `processing-service`: extrae texto/metadata, hace chunking y persiste en Qdrant (vector + payload JSON).
   - `rag-service`: resuelve consultas:
     1. Embedding de la query con Azure OpenAI
-    2. Prefiltrado por metadatos en Qdrant
-    3. Búsqueda vectorial  
-    4. Construcción de prompt y llamada a GPT‑4
+    2. Búsqueda vectorial en Qdrant (`query_points`, top_k×3)
+    3. Construcción de prompt y llamada a GPT‑4o‑mini (extracción + relevance_score)
+    4. Score híbrido (coseno + relevancia LLM) y **post-filtro Python** por `exp_years`/`location`
+       (no se prefiltra en Qdrant: `location` es free-text y `exp_years` poco fiable)
     5. Respuesta justificada al frontend.
 - Orquestación RAG implementada con **LlamaIndex**; NO usar CrewAI salvo que el alcance cambie.
 
 ## Reglas para generar código
+
 - Usar **FastAPI async** en todos los endpoints con I/O (Blob, Qdrant, Azure OpenAI).
 - Separar capas:
   - `routers/` → HTTP + validación Pydantic
@@ -45,9 +49,9 @@
 - Diferenciar explícitamente:
   - Flujos **asíncronos**: ingesta/procesamiento de documentos.
   - Flujos **síncronos**: consultas de reclutadores.
-- Los endpoints de ingesta (`POST /documents`) deben aceptar la petición,
-  encolar el trabajo y devolver rápido; el procesamiento pesado se hace en
-  background (task async / worker).
+- Los endpoints de ingesta (`POST /upload`) aceptan la petición y devuelven rápido (`202`); el
+  procesamiento pesado se delega (hoy vía `BackgroundTasks`). Ver el riesgo scale-to-zero asociado
+  en README/OPERATIONS antes de asumir que el background siempre completa en Azure.
 - Los endpoints de `/search` deben asumir baja latencia y **NO** disparar tareas
   de procesamiento de documentos.
 - Todas las operaciones sobre Qdrant se harán contra una única colección
@@ -67,9 +71,10 @@
 ```
 
 ## Contrato con el frontend (otro repo)
+
 - Endpoints:
-  - `POST /documents` → subir uno o varios PDFs (multipart), respuesta con IDs/estado.
-  - `GET /documents/{id}/status` → estado de procesamiento.
+  - `POST /upload` → subir uno o varios PDFs (multipart), respuesta con IDs/estado.
+  - `GET /upload/{doc_id}/status` → estado de procesamiento.
   - `POST /search` → recibe descripción del puesto y filtros; devuelve lista de candidatos con score, resumen y motivo de selección.
 - Respuesta estándar:
   - Éxito: `{ "data": ..., "error": null }`
@@ -77,6 +82,7 @@
 - Habilitar CORS solo para el origen del frontend.
 
 ## Reglas de acción de Copilot
+
 - Para cada solicitud de código, actuar solo sobre lo que se pide explícitamente,
   sin avanzar fases futuras ni añadir endpoints no mencionados.
 - No reintroducir código que haya sido eliminado en commits recientes.

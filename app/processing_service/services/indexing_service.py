@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 from typing import Any
 
@@ -25,6 +26,18 @@ from ..repositories.qdrant_repository import QdrantRepository
 logger = structlog.get_logger(__name__)
 CHUNK_SIZE = 1024
 CHUNK_OVERLAP = 100
+
+
+def _log_success(log, event: str, **fields) -> None:
+    """Éxito final de negocio que debe sobrevivir a LOG_LEVEL=SUCCESS/WARNING en Azure.
+
+    PLACEHOLDER (dependencia Integrante 2): mientras shared/logging.py no registre el nivel
+    custom SUCCESS=25 ni exponga logger.success(), se emite a INFO. Cuando Integrante 2
+    aterrice el nivel, este helper usará logger.success() automáticamente. Se puede entonces
+    sustituir por la llamada directa log.success(event, **fields) y borrar este helper.
+    """
+    success = getattr(log, "success", None)
+    (success if callable(success) else log.info)(event, **fields)
 
 # Serializa el procesamiento dentro de la réplica: aunque lleguen varias peticiones
 # concurrentes, los CVs se indexan de uno en uno para no saturar los 10K TPM del
@@ -52,46 +65,76 @@ class IndexingService:
 
     async def process_document(self, doc_id: uuid.UUID, blob_name: str) -> None:
         log = logger.bind(doc_id=str(doc_id), blob_name=blob_name)
+        start = time.perf_counter()
         # El semáforo serializa el trabajo pesado (descarga + LLM + embeddings + Qdrant)
         # para no saturar la cuota de Azure OpenAI cuando llegan varios CVs.
         async with _PROCESSING_SEMAPHORE:
             log.info("indexing_started")
             try:
-                pdf_bytes = await self._blob.download(blob_name)
+                try:
+                    pdf_bytes = await self._blob.download(blob_name)
+                except Exception as exc:
+                    raise ProcessingError(f"No se pudo descargar {blob_name}: {exc}") from exc
+                try:
+                    raw_text, pdf_meta = self._extract(pdf_bytes, blob_name)
+                except Exception as exc:
+                    raise ProcessingError(f"Error extrayendo texto de {blob_name}: {exc}") from exc
+                clean = self._clean_text(raw_text)
+                if not clean.strip():
+                    raise ProcessingError(f"PDF vacio: {blob_name}")
+                # Extrae metadatos estructurados UNA sola vez; se denormalizan en cada chunk
+                meta = await self._extract_metadata(clean)
+                log.info(
+                    "metadata_extracted",
+                    has_email=bool(meta.get("email")),
+                    has_phone=bool(meta.get("phone")),
+                    exp_years=meta.get("exp_years", 0),
+                    n_skills=len(meta.get("skills", [])),
+                )
+                # Degradación: el CV se indexa igualmente pero sin datos de contacto fiables.
+                if not meta.get("name") and not meta.get("email"):
+                    log.warning(
+                        "indexing_degraded",
+                        reason="missing_contact_metadata",
+                        has_email=bool(meta.get("email")),
+                        has_name=bool(meta.get("name")),
+                    )
+                base_meta = CandidatePayload(
+                    candidate_id=str(doc_id), file_name=blob_name,
+                    contact_info={
+                        "name": meta.get("name", ""),
+                        "email": meta.get("email", ""),
+                        "phone": meta.get("phone", ""),
+                        "skills": meta.get("skills", []),
+                    },
+                    exp_years=int(meta.get("exp_years") or 0),
+                    location=meta.get("location"),
+                    chunk_text="",
+                )
+                counts = await self.process_and_index_document(clean, base_meta)
+                # Degradación: algún chunk no se persistió (p. ej. quedó sin embedding).
+                if counts["qdrant_points"] < counts["n_chunks"]:
+                    log.warning(
+                        "indexing_degraded",
+                        reason="chunks_without_embedding",
+                        n_chunks=counts["n_chunks"],
+                        qdrant_points=counts["qdrant_points"],
+                    )
             except Exception as exc:
-                raise ProcessingError(f"No se pudo descargar {blob_name}: {exc}") from exc
-            try:
-                raw_text, pdf_meta = self._extract(pdf_bytes, blob_name)
-            except Exception as exc:
-                raise ProcessingError(f"Error extrayendo texto de {blob_name}: {exc}") from exc
-            clean = self._clean_text(raw_text)
-            if not clean.strip():
-                raise ProcessingError(f"PDF vacio: {blob_name}")
-            # Extrae metadatos estructurados UNA sola vez; se denormalizan en cada chunk
-            meta = await self._extract_metadata(clean)
-            log.info(
-                "metadata_extracted",
-                has_email=bool(meta.get("email")),
-                has_phone=bool(meta.get("phone")),
-                exp_years=meta.get("exp_years", 0),
-                n_skills=len(meta.get("skills", [])),
+                log.error("indexing_failed", error=str(exc), error_type=type(exc).__name__)
+                raise
+            _log_success(
+                log,
+                "indexing_completed",
+                n_chunks=counts["n_chunks"],
+                embedding_count=counts["embedding_count"],
+                qdrant_points=counts["qdrant_points"],
+                duration_ms=round((time.perf_counter() - start) * 1000, 2),
             )
-            base_meta = CandidatePayload(
-                candidate_id=str(doc_id), file_name=blob_name,
-                contact_info={
-                    "name": meta.get("name", ""),
-                    "email": meta.get("email", ""),
-                    "phone": meta.get("phone", ""),
-                    "skills": meta.get("skills", []),
-                },
-                exp_years=int(meta.get("exp_years") or 0),
-                location=meta.get("location"),
-                chunk_text="",
-            )
-            await self.process_and_index_document(clean, base_meta)
-            log.info("indexing_completed")
 
-    async def process_and_index_document(self, text: str, metadata: CandidatePayload) -> None:
+    async def process_and_index_document(
+        self, text: str, metadata: CandidatePayload
+    ) -> dict[str, int]:
         chunks: list[str] = self._splitter.split_text(text)
         if not chunks:
             raise ProcessingError("SentenceSplitter no genero ningun chunk")
@@ -119,13 +162,19 @@ class IndexingService:
             for chunk, emb in zip(chunks, embeddings)
         ]
         try:
-            await self._qdrant.upsert_nodes(
+            qdrant_points = await self._qdrant.upsert_nodes(
                 doc_id=uuid.UUID(metadata.candidate_id),
                 nodes=nodes, doc_metadata=metadata.model_dump(),
             )
         except Exception as exc:
             logger.error("qdrant_upsert_error", exc_type=type(exc).__name__, exc_repr=repr(exc))
             raise VectorStoreError(f"Error subiendo nodos a Qdrant: {type(exc).__name__}: {exc}") from exc
+
+        return {
+            "n_chunks": len(chunks),
+            "embedding_count": len(embeddings),
+            "qdrant_points": qdrant_points,
+        }
 
     async def _extract_metadata(self, text: str) -> dict[str, Any]:
         """

@@ -28,12 +28,12 @@ app/
 └── shared/               # Configuración, modelos Pydantic, excepciones y fakes
 ```
 
-### Flujo de ingesta (síncrono, serializado)
+### Flujo de ingesta
 
 ```
 Frontend
-  └─→ POST /upload (ingest-service)
-        └─→ Azure Blob Storage (guarda PDF)
+  └─→ POST /upload (ingest-service) → responde 202 de inmediato
+        └─ (BackgroundTask) ─→ Azure Blob Storage (guarda PDF)
               └─→ POST /processing/{doc_id} (processing-service, espera respuesta)
                     ├─→ PyMuPDF + pypdf: extracción de texto completo
                     ├─→ GPT-4o-mini: extrae nombre, email, teléfono, ubicación,
@@ -45,7 +45,9 @@ Frontend
                         en su payload (denormalizados)
 ```
 
-> **Diseño clave — procesamiento síncrono + semáforo:** el endpoint `/processing/{doc_id}` es síncrono (no usa BackgroundTasks). Un `asyncio.Semaphore(1)` serializa los CVs dentro de la réplica para no saturar los 10K TPM de Azure OpenAI. Azure Container Apps mantiene la réplica viva mientras hay una petición HTTP activa, lo que evita el problema de CVs quedados "en proceso" que ocurría con el enfoque async anterior (KEDA terminaba la réplica tras el 202).
+> **Diseño clave — processing-service síncrono + semáforo:** el endpoint `/processing/{doc_id}` es síncrono (no usa BackgroundTasks). Un `asyncio.Semaphore(1)` serializa los CVs dentro de la réplica para no saturar los 10K TPM de Azure OpenAI. Azure Container Apps mantiene la réplica de processing viva mientras hay una petición HTTP activa, lo que evita el problema de CVs quedados "en proceso".
+
+> ⚠️ **Riesgo conocido — la ingesta SÍ usa BackgroundTask:** `POST /upload` valida el PDF, devuelve `202` y delega la subida a Blob + el disparo de processing a un `BackgroundTasks.add_task` ([ingest_service.py](app/ingest_service/services/ingest_service.py)). En Azure Container Apps con `min_replicas=0`, si la réplica de **ingest** escala a cero tras responder el `202`, ese BackgroundTask puede morir antes de subir el blob o disparar processing — el mismo patrón scale-to-zero que motivó hacer síncrono el processing-service. Es un riesgo latente, no resuelto: para cerrarlo habría que hacer también síncrona la ingesta (subir a Blob + disparar processing antes de responder) o mover el trabajo a una cola durable. Ver §"Riesgo de ingesta asíncrona" en [OPERATIONS.md](OPERATIONS.md).
 
 ### Flujo de búsqueda (síncrono)
 
@@ -116,23 +118,28 @@ git clone https://github.com/TalentRefineAI/TalentRefineAI-Backend.git
 cd TalentRefineAI-Backend
 
 # Levantar todos los servicios con fakes (sin credenciales Azure)
-docker compose -f docker-compose.local-fake.yml up --build
+make dev-fake
+# Equivalente sin Makefile (se necesitan AMBOS compose: base + override fake):
+# docker compose -f docker-compose.yml -f docker-compose.local-fake.yml up --build
 ```
 
-Servicios disponibles:
-- ingest-service:     http://localhost:8000/docs
-- rag-service:        http://localhost:8001/docs
+Servicios disponibles (puertos de host según `docker-compose.yml`):
+- ingest-service:     http://localhost:8001/docs
 - processing-service: http://localhost:8002/docs
+- rag-service:        http://localhost:8003/docs
 - Qdrant dashboard:   http://localhost:6333/dashboard
 
 ### Ejecutar tests
 
 ```bash
-# Con servicios levantados (local-fake)
-bash run_tests.sh
+# E2E backend local-fake (levanta y detiene su propio stack Docker)
+make test-fake-flow
 
-# O directamente
-pytest tests/integration/ -v
+# Unitarios + E2E fake
+make test-fake-all
+
+# O directamente, sin Makefile
+pytest tests/integration/local_fake -m integration -v
 ```
 
 ---
