@@ -57,9 +57,13 @@ FAKE_EMBEDDING_DIMENSIONS=1536
 
 Cuando `USE_FAKE_INTEGRATIONS=True`, el backend evita llamadas a Azure Blob, Azure Key Vault y Azure OpenAI.
 
-Como medida de seguridad, la configuracion impide arrancar con `USE_FAKE_INTEGRATIONS=True`
-si `APP_ENV` es `production`, `prod` o `pro`. El modo fake existe para desarrollo,
-validacion local y evidencias tecnicas; no debe activarse en entornos productivos.
+El modo fake existe para desarrollo, validacion local y evidencias tecnicas; **no debe activarse en
+entornos productivos**.
+
+> ⚠️ **Pendiente (prod-readiness):** la salvaguarda que bloquearia el arranque con
+> `USE_FAKE_INTEGRATIONS=True` cuando `APP_ENV` es `production`/`prod`/`pro` **todavia NO esta
+> implementada** en `app/shared/config.py`. Hoy la proteccion es solo de proceso (no desplegar el
+> override fake en prod). Conviene añadir el guard real en `Settings` antes de produccion.
 
 ---
 
@@ -198,10 +202,10 @@ El PDF debe contener texto extraible. Si es un escaneo o imagen, PyMuPDF probabl
 
 ## Levantar el entorno local fake
 
-Desde el backend:
+Desde la raíz del repositorio backend (`TalentRefineAI-Backend`):
 
 ```bash
-cd /home/jldom/TFM/TalentRefine/TalentRefineAI-Backend
+cd /ruta/a/TalentRefineAI-Backend
 ```
 
 Levanta los servicios backend y Qdrant:
@@ -493,8 +497,8 @@ Esto incluye `summary.json`, `summary.txt`, `test_start.txt` y `test_end.txt`.
 ## Como volver al modo Azure real
 
 Cuando existan recursos cloud reales, debes desactivar el modo fake y usar el compose base o variables reales.
-El codigo incorpora una proteccion adicional: si `APP_ENV` es `production`, `prod` o `pro`,
-la aplicacion falla al arrancar si `USE_FAKE_INTEGRATIONS=True`.
+(Recordatorio: el guard que haria fallar el arranque con `USE_FAKE_INTEGRATIONS=True` en
+`APP_ENV=production` aun no esta implementado — ver nota al inicio del documento.)
 
 ### 1. No usar el override local fake
 
@@ -529,8 +533,8 @@ QDRANT_COLLECTION=talentrefine-candidates
 
 AZURE_OPENAI_ENDPOINT=https://<openai-resource>.openai.azure.com/
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
-AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-4o
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-4o-mini
 
 CORS_ALLOWED_ORIGINS=["http://localhost:8501"]
 LOG_LEVEL=INFO

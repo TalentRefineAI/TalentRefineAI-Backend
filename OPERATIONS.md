@@ -405,25 +405,44 @@ az monitor log-analytics query --workspace $LAW_ID \
 
 ### Consultas KQL útiles
 
+> 📌 El catálogo completo y mantenido de queries vive en `docs/kql/mvp-observability.kql`
+> (lo gestiona el reparto de observabilidad MVP, ver `MONITORIZACION_LOGGING_AZURE_PLAN.md`).
+> Usa **los nombres de evento reales** emitidos por el backend; los ejemplos de abajo ya están
+> alineados con ellos.
+
+Eventos de negocio reales emitidos por el backend (logs JSON parseables por `parse_json(Log_s)`):
+
+| Servicio | Éxito final | Degradación | Error |
+|----------|-------------|-------------|-------|
+| ingest | `document_upload_completed` | `rejected_file` | `upload_failed`, `processing_trigger_failed` |
+| processing | `indexing_completed` | `indexing_degraded` | `indexing_failed` |
+| rag | `rag_search_completed` | `rag_search_degraded` | `rag_search_failed` |
+
 ```kql
-// Latencia de peticiones /search
+// Latencia de búsquedas RAG completadas
 ContainerAppConsoleLogs_CL
 | where ContainerAppName_s == "ca-rag-talentrefine-dev-spc"
-| where Log_s contains "search_completed"
-| extend duration = extract("duration_ms=(\\d+)", 1, Log_s)
-| project TimeGenerated, duration
+| extend log = parse_json(Log_s)
+| where tostring(log.event) == "rag_search_completed"
+| project TimeGenerated, duration_ms = todouble(log.duration_ms), results_count = toint(log.results_count)
 
-// Errores de LLM extraction
+// Errores y degradaciones de búsqueda RAG
 ContainerAppConsoleLogs_CL
-| where Log_s contains "llm_extraction_failed"
-| project TimeGenerated, Log_s
+| extend log = parse_json(Log_s)
+| where tostring(log.event) in ("rag_search_failed", "rag_search_degraded")
+| project TimeGenerated, event = tostring(log.event), reason = tostring(log.reason), error = tostring(log.error)
 
-// Documentos procesados por día
+// Documentos indexados por día
 ContainerAppConsoleLogs_CL
 | where ContainerAppName_s == "ca-proc-talentrefine-dev-spc"
-| where Log_s contains "chunks_upserted"
+| extend log = parse_json(Log_s)
+| where tostring(log.event) == "indexing_completed"
 | summarize count() by bin(TimeGenerated, 1d)
 ```
+
+> ⚠️ Hasta que el nivel custom `SUCCESS=25` esté registrado en `app/shared/logging.py`, los
+> eventos `*_completed` se emiten a nivel `info` (no `success`). Filtra por `event`, no por `level`,
+> mientras tanto.
 
 ### Health checks rápidos
 ```bash
@@ -434,3 +453,36 @@ for CA in $CA_FRONTEND $CA_INGEST $CA_RAG $CA_PROC; do
   az containerapp revision list --name $CA --resource-group $RG     --query "[?properties.active].{name:name,replicas:properties.replicas,traffic:properties.trafficWeight}"     --output table
 done
 ```
+
+---
+
+## 10. Riesgos conocidos
+
+### 10.1 Ingesta asíncrona vs scale-to-zero (riesgo latente, NO resuelto)
+
+**Qué pasa:** `POST /upload` (ingest-service) valida el PDF, responde `202 Accepted` y **delega el
+trabajo a un `BackgroundTasks.add_task`**: la subida a Blob y el disparo de `POST /processing/{doc_id}`
+ocurren *después* de responder, en segundo plano dentro de la misma réplica
+([app/ingest_service/services/ingest_service.py](app/ingest_service/services/ingest_service.py)).
+
+**Por qué es un riesgo en Azure:** las Container Apps corren con `min_replicas=0`. Si la réplica de
+**ingest** escala a cero tras devolver el `202` (sin peticiones HTTP entrantes que la mantengan viva),
+el BackgroundTask puede ser terminado por KEDA antes de completar la subida o el disparo de processing.
+El CV quedaría aceptado pero **nunca indexado**, sin error visible para el usuario. Es exactamente el
+patrón scale-to-zero que ya motivó hacer **síncrono** el processing-service.
+
+**Síntoma observable:** en Log Analytics aparece el `202` pero **no** aparece
+`document_upload_completed` ni `indexing_completed` para ese `doc_id`; o aparece
+`processing_trigger_failed`/`ConnectError` si la réplica de processing tampoco estaba lista.
+
+**Mitigaciones posibles (a decidir por el equipo, fuera del MVP de observabilidad):**
+1. Hacer la ingesta **síncrona**: subir a Blob + disparar processing *antes* de responder (cambia el
+   contrato a una respuesta más lenta pero fiable). Es la opción coherente con el diseño del
+   processing-service.
+2. Mantener `min_replicas=1` en ingest mientras haya tráfico esperado (coste extra, no FinOps).
+3. Mover el trabajo a una **cola durable** (Azure Storage Queue / Service Bus) + worker, que sobrevive
+   al reciclado de réplicas. Es la solución productiva real, pero excede el alcance del TFM MVP.
+
+> Mientras no se mitigue, la observabilidad MVP **detecta** el problema (ausencia de
+> `document_upload_completed`/`indexing_completed` para un `doc_id` con `202`), que es justamente lo que
+> permite diagnosticarlo en una demo o entrega.
