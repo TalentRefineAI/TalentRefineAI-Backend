@@ -23,10 +23,10 @@ del sistema TalentRefineAI en Azure.
 
 **FQDNs de Container Apps:**
 ```
-Frontend:   ca-frontend-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io
-Ingest:     ca-ingesta-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io
-RAG:        ca-rag-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io
-Processing: ca-proc-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io
+Frontend:   <ca-frontend-app>.<environment>.<region>.azurecontainerapps.io
+Ingest:     <ca-ingesta-app>.<environment>.<region>.azurecontainerapps.io
+RAG:        <ca-rag-app>.<environment>.<region>.azurecontainerapps.io
+Processing: <ca-proc-app>.<environment>.<region>.azurecontainerapps.io
 ```
 
 **Variables útiles (pegar en terminal antes de ejecutar comandos):**
@@ -175,7 +175,7 @@ az containerapp update   --name $CA_RAG   --resource-group $RG   --min-replicas 
 
 ### Verificar estado HTTP de todos los servicios
 ```bash
-for FQDN in   "ca-frontend-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io"   "ca-ingesta-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io/health"   "ca-rag-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io/health"   "ca-proc-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io/health"; do
+for FQDN in   "<ca-frontend-app>.<environment>.<region>.azurecontainerapps.io"   "<ca-ingesta-app>.<environment>.<region>.azurecontainerapps.io/health"   "<ca-rag-app>.<environment>.<region>.azurecontainerapps.io/health"   "<ca-proc-app>.<environment>.<region>.azurecontainerapps.io/health"; do
   CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "https://$FQDN")
   echo "$CODE  $FQDN"
 done
@@ -223,7 +223,7 @@ az storage blob list   --account-name sttalentrefinedevspc   --container-name cv
 ### Eliminar todos los blobs (limpiar CVs)
 ```bash
 # Mediante la API del ingest-service (forma recomendada):
-curl -X DELETE "https://ca-ingesta-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io/upload/all"
+curl -X DELETE "https://<ca-ingesta-app>.<environment>.<region>.azurecontainerapps.io/upload/all"
 
 # O directamente con az cli:
 az storage container delete   --account-name sttalentrefinedevspc   --name cv-uploads   --auth-mode login
@@ -276,7 +276,7 @@ curl -s -H "api-key: $QDRANT_KEY" "$QDRANT_URL/collections/talentrefine-candidat
 ### Via API del rag-service (forma recomendada en producción)
 
 ```bash
-BASE="https://ca-rag-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io"
+BASE="https://<ca-rag-app>.<environment>.<region>.azurecontainerapps.io"
 
 # Listar candidatos indexados
 curl "$BASE/search/candidates"
@@ -311,7 +311,7 @@ az acr build --registry $ACR   --image rag-hr-frontend:latest   --file Dockerfil
 az containerapp update   --name $CA_FRONTEND   --resource-group $RG   --image $ACR.azurecr.io/rag-hr-frontend:latest   --revision-suffix $SUFFIX
 
 # --- Verificar ---
-curl -s -o /dev/null -w "%{http_code}"   "https://ca-frontend-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io/"
+curl -s -o /dev/null -w "%{http_code}"   "https://<ca-frontend-app>.<environment>.<region>.azurecontainerapps.io/"
 ```
 
 ---
@@ -529,7 +529,7 @@ al Container App de processing en Terraform (`TalentRefineAI-Infra`), espejo de 
 **Reproceso de CVs degradados:** los blobs ya están en Storage; re-disparar processing es idempotente
 (el upsert por `candidate_id` sobrescribe). `ca-proc` y `ca-rag` tienen ingress externo:
 ```bash
-PROC=https://ca-proc-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io
+PROC=https://<ca-proc-app>.<environment>.<region>.azurecontainerapps.io
 curl -X POST -G "$PROC/processing/<doc_id>" --data-urlencode "blob_name=<doc_id>/<fichero>.pdf"
 ```
 > ⚠️ **Gotcha al scriptar el reproceso en Windows/Git Bash:** `az ... -o tsv` emite líneas con CRLF y
