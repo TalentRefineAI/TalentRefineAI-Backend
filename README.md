@@ -11,9 +11,6 @@ Backend del sistema **TalentRefine AI**, plataforma de reclutamiento inteligente
 | `dev` | Rama de desarrollo activa — **HEAD actual en producción** |
 | `main` | Rama estable (merges desde `dev`) |
 
-**Frontend en producción:**
-`https://ca-frontend-talentrefine-dev-spc.greenwave-4d796cb5.spaincentral.azurecontainerapps.io`
-
 ---
 
 ## Arquitectura
